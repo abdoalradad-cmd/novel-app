@@ -1,0 +1,25 @@
+{
+  "appId": "com.alradad.novels",
+  "appName": "روائع الرداد",
+  "webDir": "www",
+  "backgroundColor": "#022c22",
+  "server": {
+    "url": "https://abdoalradad-cmd.github.io/novel_site/",
+    "errorPath": "offline.html",
+    "cleartext": false,
+    "allowNavigation": ["abdoalradad-cmd.github.io"]
+  },
+  "android": { "allowMixedContent": false, "backgroundColor": "#022c22" },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1500,
+      "launchAutoHide": true,
+      "backgroundColor": "#022c22",
+      "androidScaleType": "CENTER_CROP",
+      "showSpinner": false,
+      "splashFullScreen": true,
+      "splashImmersive": true
+    },
+    "StatusBar": { "style": "DARK", "backgroundColor": "#022c22", "overlaysWebView": false }
+  }
+}
