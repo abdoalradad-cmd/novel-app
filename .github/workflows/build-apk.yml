@@ -26,6 +26,15 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
+      - name: Add native code (PDF printing + text-to-speech)
+        run: |
+          mkdir -p android/app/src/main/java/com/alradad/novels
+          cp native/AppNativePlugin.java native/MainActivity.java android/app/src/main/java/com/alradad/novels/
+          sed -i 's#<application#<queries><intent><action android:name="android.intent.action.TTS_SERVICE" /></intent></queries>\n    <application#' android/app/src/main/AndroidManifest.xml
+          grep -n "TTS_SERVICE" android/app/src/main/AndroidManifest.xml
+          sed -i '0,/^dependencies {/s//dependencies {\n    implementation "androidx.webkit:webkit:1.12.1"/' android/app/build.gradle
+          grep -n "androidx.webkit" android/app/build.gradle
+
       - name: Generate icons and splash screens
         run: npx capacitor-assets generate --android
 
