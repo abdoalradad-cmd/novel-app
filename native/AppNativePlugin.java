@@ -2,6 +2,8 @@ package com.alradad.novels;
 
 import android.content.Context;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.print.PrintAttributes;
 import android.print.PrintDocumentAdapter;
 import android.print.PrintManager;
@@ -52,7 +54,8 @@ public class AppNativePlugin extends Plugin {
                     wv.setWebViewClient(new WebViewClient() {
                         @Override
                         public void onPageFinished(final WebView view, String url) {
-                            view.postDelayed(new Runnable() {
+                            // ملاحظة: view.postDelayed لا يعمل لأن الـ WebView غير مضاف للشاشة، فنستخدم Handler
+                            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
                                 @Override
                                 public void run() {
                                     try {
