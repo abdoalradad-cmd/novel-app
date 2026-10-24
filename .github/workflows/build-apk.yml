@@ -35,6 +35,15 @@ jobs:
           sed -i '0,/^dependencies {/s//dependencies {\n    implementation "androidx.webkit:webkit:1.12.1"/' android/app/build.gradle
           grep -n "androidx.webkit" android/app/build.gradle
 
+      - name: Set app version and stable signing key
+        run: |
+          V=$(tr -d '[:space:]' < APP_VERSION)
+          sed -i "s/versionName \".*\"/versionName \"$V\"/" android/app/build.gradle
+          sed -i "s/versionCode [0-9]*/versionCode ${{ github.run_number }}/" android/app/build.gradle
+          grep -n "versionCode\|versionName" android/app/build.gradle
+          mkdir -p ~/.android
+          cp native/radpad-debug.keystore ~/.android/debug.keystore
+
       - name: Generate icons and splash screens
         run: npx capacitor-assets generate --android
 
