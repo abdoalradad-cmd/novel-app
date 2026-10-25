@@ -1,9 +1,0 @@
-name = "radpad-api"
-main = "src/index.js"
-compatibility_date = "2025-01-01"
-workers_dev = true
-
-[[d1_databases]]
-binding = "DB"
-database_name = "radpad-db"
-database_id = "__DB_ID__"
