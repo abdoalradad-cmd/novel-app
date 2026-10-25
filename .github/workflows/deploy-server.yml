@@ -1,0 +1,75 @@
+name: Deploy Server (Cloudflare)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'server/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check secrets
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::ناقص CLOUDFLARE_API_TOKEN أو CLOUDFLARE_ACCOUNT_ID في Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+
+      - name: Prepare database and workers.dev address
+        run: |
+          set -e
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+
+          LIST=$(curl -s -H "$AUTH" "$API/d1/database?name=radpad-db")
+          DB_ID=$(echo "$LIST" | jq -r '.result[0].uuid // empty')
+          if [ -z "$DB_ID" ]; then
+            CREATED=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" --data '{"name":"radpad-db"}' "$API/d1/database")
+            DB_ID=$(echo "$CREATED" | jq -r '.result.uuid // empty')
+            if [ -z "$DB_ID" ]; then
+              echo "::error::فشل إنشاء قاعدة البيانات. غالبًا التوكن ناقصه صلاحية D1 Edit. رد Cloudflare:"
+              echo "$CREATED" | jq -c '.errors' || echo "$CREATED"
+              exit 1
+            fi
+          fi
+          sed -i "s/__DB_ID__/$DB_ID/" server/wrangler.toml
+          echo "database id: $DB_ID"
+
+          SUB=$(curl -s -H "$AUTH" "$API/workers/subdomain" | jq -r '.result.subdomain // empty')
+          if [ -z "$SUB" ]; then
+            SUB="radpad-$(openssl rand -hex 3)"
+            R=$(curl -s -X PUT -H "$AUTH" -H "Content-Type: application/json" --data "{\"subdomain\":\"$SUB\"}" "$API/workers/subdomain")
+            echo "$R" | jq -e '.success' >/dev/null || { echo "::error::فشل إنشاء عنوان workers.dev: $R"; exit 1; }
+          fi
+          echo "SUB=$SUB" >> "$GITHUB_ENV"
+
+      - name: Create tables
+        working-directory: server
+        run: npx --yes wrangler@4 d1 execute radpad-db --remote --file=schema.sql
+
+      - name: Deploy worker
+        working-directory: server
+        run: npx --yes wrangler@4 deploy
+
+      - name: Show server address
+        run: |
+          URL="https://radpad-api.$SUB.workers.dev"
+          echo "عنوان السيرفر: $URL"
+          echo "### ✅ عنوان السيرفر بتاعك" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$URL\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "انسخه وحطه في لوحة تحكم الموقع (تبويب التطبيق والإشعارات ← رابط سيرفر الحسابات)." >> "$GITHUB_STEP_SUMMARY"
+          sleep 5
+          curl -s "$URL/api" || true
