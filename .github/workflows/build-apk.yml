@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
+    paths-ignore:
+      - 'server/**'
+      - '.github/workflows/deploy-server.yml'
 
 jobs:
   build:
