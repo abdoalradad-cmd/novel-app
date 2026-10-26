@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   pass_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  premium_until INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS novels (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -16,9 +17,9 @@ CREATE TABLE IF NOT EXISTS novels (
   updated_at INTEGER NOT NULL,
   published_at INTEGER,
   d_title TEXT NOT NULL DEFAULT '', d_author TEXT NOT NULL DEFAULT '', d_genre TEXT NOT NULL DEFAULT '',
-  d_tags TEXT NOT NULL DEFAULT '[]', d_synopsis TEXT NOT NULL DEFAULT '', d_cover TEXT NOT NULL DEFAULT '',
+  d_tags TEXT NOT NULL DEFAULT '[]', d_synopsis TEXT NOT NULL DEFAULT '', d_cover TEXT NOT NULL DEFAULT '', d_extra TEXT NOT NULL DEFAULT '{}',
   l_title TEXT NOT NULL DEFAULT '', l_author TEXT NOT NULL DEFAULT '', l_genre TEXT NOT NULL DEFAULT '',
-  l_tags TEXT NOT NULL DEFAULT '[]', l_synopsis TEXT NOT NULL DEFAULT '', l_cover TEXT NOT NULL DEFAULT ''
+  l_tags TEXT NOT NULL DEFAULT '[]', l_synopsis TEXT NOT NULL DEFAULT '', l_cover TEXT NOT NULL DEFAULT '', l_extra TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_novels_user ON novels(user_id);
 CREATE INDEX IF NOT EXISTS idx_novels_status ON novels(status, is_live);
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS chapters (
   idx INTEGER NOT NULL,
   title TEXT NOT NULL,
   content TEXT NOT NULL,
+  locked INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (novel_id, ver, idx)
 );
 CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
