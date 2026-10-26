@@ -1,8 +1,15 @@
 package com.alradad.novels;
 
+import android.Manifest;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.webkit.WebView;
 
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
@@ -33,10 +40,27 @@ public class MainActivity extends BridgeActivity {
             + "if(code){window.__appBridgeLoaded=true;(0,eval)(code);}"
             + "}catch(e){}})();";
 
+    // إشعارات الموبايل: قناة + إذن أندرويد 13 + الاشتراك في موضوع "all" (لو ملف Firebase مش موجود بيتجاهل بهدوء)
+    private void initPush() {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel ch = new NotificationChannel("radpad_alerts", "إشعارات RadPad", NotificationManager.IMPORTANCE_HIGH);
+                getSystemService(NotificationManager.class).createNotificationChannel(ch);
+            }
+            if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 77);
+            }
+        } catch (Throwable t) { }
+        try {
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().subscribeToTopic("all");
+        } catch (Throwable t) { }
+    }
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AppNativePlugin.class);
         super.onCreate(savedInstanceState);
+        initPush();
         try {
             WebView wv = getBridge().getWebView();
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
