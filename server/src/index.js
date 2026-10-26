@@ -103,11 +103,11 @@ function cleanNovel(b) {
 }
 const parseTags = (s) => { try { const a = JSON.parse(s); return Array.isArray(a) ? a : []; } catch (e) { return []; } };
 
-async function body(request) {
+async function body(request, max = LIM.body) {
   const len = parseInt(request.headers.get('content-length') || '0', 10);
-  if (len > LIM.body) throw new Error('الطلب كبير جدًا');
+  if (len > max * 2) throw new Error('الطلب كبير جدًا');
   const text = await request.text();
-  if (text.length > LIM.body) throw new Error('الطلب كبير جدًا');
+  if (text.length > max) throw new Error('الطلب كبير جدًا');
   try { return JSON.parse(text || '{}'); } catch (e) { throw new Error('بيانات غير صحيحة'); }
 }
 
@@ -291,6 +291,26 @@ async function route(request, env) {
     if ((g = /^\/api\/admin\/novels\/(\d+)\/unpublish$/.exec(path)) && m === 'POST') {
       await env.DB.prepare("UPDATE novels SET is_live=0,status='draft',updated_at=? WHERE id=?").bind(Date.now(), +g[1]).run();
       return json({ ok: true });
+    }
+    if (path === '/api/admin/backup' && m === 'GET') {
+      const all = async (t) => (await env.DB.prepare('SELECT * FROM ' + t).all()).results;
+      return json({ app: 'radpad', version: 1, createdAt: Date.now(), users: await all('users'), novels: await all('novels'), chapters: await all('chapters') });
+    }
+    if (path === '/api/admin/restore' && m === 'POST') {
+      const b = await body(request, 40000000);
+      if (!b || b.app !== 'radpad' || !Array.isArray(b.users) || !Array.isArray(b.novels) || !Array.isArray(b.chapters)) return fail('ملف النسخة الاحتياطية غير صحيح');
+      const cols = {
+        users: ['id', 'email', 'name', 'pass_hash', 'role', 'created_at'],
+        novels: ['id', 'user_id', 'status', 'is_live', 'reject_reason', 'created_at', 'updated_at', 'published_at', 'd_title', 'd_author', 'd_genre', 'd_tags', 'd_synopsis', 'd_cover', 'l_title', 'l_author', 'l_genre', 'l_tags', 'l_synopsis', 'l_cover'],
+        chapters: ['novel_id', 'ver', 'idx', 'title', 'content']
+      };
+      const stmts = [];
+      for (const t of ['users', 'novels', 'chapters']) {
+        const c = cols[t], q = `INSERT OR REPLACE INTO ${t} (${c.join(',')}) VALUES (${c.map(() => '?').join(',')})`;
+        for (const row of b[t]) stmts.push(env.DB.prepare(q).bind(...c.map((k) => (row[k] === undefined ? null : row[k]))));
+      }
+      for (let i = 0; i < stmts.length; i += 40) await env.DB.batch(stmts.slice(i, i + 40));
+      return json({ ok: true, users: b.users.length, novels: b.novels.length, chapters: b.chapters.length });
     }
     if (path === '/api/admin/live' && m === 'GET') {
       const { results } = await env.DB.prepare('SELECT n.*,u.name AS owner FROM novels n JOIN users u ON u.id=n.user_id WHERE n.is_live=1 ORDER BY n.published_at DESC').all();
