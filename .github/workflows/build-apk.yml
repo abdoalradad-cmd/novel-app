@@ -38,6 +38,22 @@ jobs:
           sed -i '0,/^dependencies {/s//dependencies {\n    implementation "androidx.webkit:webkit:1.12.1"/' android/app/build.gradle
           grep -n "androidx.webkit" android/app/build.gradle
 
+      - name: Add phone push notifications (Firebase)
+        run: |
+          sed -i '0,/^dependencies {/s//dependencies {\n    implementation platform("com.google.firebase:firebase-bom:33.7.0")\n    implementation "com.google.firebase:firebase-messaging"/' android/app/build.gradle
+          sed -i 's#<application#<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <application#' android/app/src/main/AndroidManifest.xml
+          sed -i 's#</application>#    <meta-data android:name="com.google.firebase.messaging.default_notification_icon" android:resource="@drawable/ic_stat_radpad" />\n        <meta-data android:name="com.google.firebase.messaging.default_notification_color" android:resource="@android:color/holo_green_dark" />\n    </application>#' android/app/src/main/AndroidManifest.xml
+          mkdir -p android/app/src/main/res/drawable
+          cp native/ic_stat_radpad.xml android/app/src/main/res/drawable/
+          if [ -f native/google-services.json ]; then
+            cp native/google-services.json android/app/google-services.json
+            grep -q "com.google.gms:google-services" android/build.gradle || sed -i "0,/classpath 'com.android.tools.build:gradle/s//classpath 'com.google.gms:google-services:4.4.2'\n        classpath 'com.android.tools.build:gradle/" android/build.gradle
+            grep -q "apply plugin: 'com.google.gms.google-services'" android/app/build.gradle || echo "apply plugin: 'com.google.gms.google-services'" >> android/app/build.gradle
+            echo "Firebase ENABLED"
+          else
+            echo "Firebase file not found: phone push is OFF (app still builds normally)"
+          fi
+
       - name: Set app version and stable signing key
         run: |
           V=$(tr -d '[:space:]' < APP_VERSION)
