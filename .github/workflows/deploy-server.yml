@@ -62,6 +62,18 @@ jobs:
         working-directory: server
         run: npx --yes wrangler@4 deploy
 
+      - name: Save Firebase key for phone notifications (optional)
+        working-directory: server
+        env:
+          FCM: ${{ secrets.FCM_SERVICE_ACCOUNT }}
+        run: |
+          if [ -n "$FCM" ]; then
+            printf '%s' "$FCM" | npx --yes wrangler@4 secret put FCM_SA
+            echo "Firebase key saved"
+          else
+            echo "No FCM_SERVICE_ACCOUNT secret: phone notifications stay off"
+          fi
+
       - name: Show server address
         run: |
           URL="https://radpad-api.$SUB.workers.dev"
