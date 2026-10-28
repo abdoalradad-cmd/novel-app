@@ -11,9 +11,25 @@ background:linear-gradient(135deg,#065f46,#022c22);color:#fcf8f2;font-family:sys
 h1{font-size:22px;margin:8px 0}
 p{opacity:.85;line-height:1.8;margin:0 0 24px}
 button{background:#f59e0b;color:#022c22;border:0;border-radius:999px;padding:14px 36px;font-size:17px;font-weight:700}
-button:active{transform:scale(.97)}
+button:active{transform:scale(.97)}button[disabled]{opacity:.7}
+#st{margin-top:16px;font-size:13px;opacity:.75;min-height:18px}
 </style></head><body>
 <div class="card"><div class="ic">📖</div><h1>لا يوجد اتصال بالإنترنت</h1>
-<p>تأكد من اتصالك بالشبكة ثم حاول مرة أخرى للوصول إلى الروايات.</p>
-<button onclick="location.replace('/')">إعادة المحاولة</button></div>
+<p>تأكد من اتصالك بالشبكة. هنحاول نفتح الروايات تلقائيًا أول ما النت يرجع.</p>
+<button id="b" onclick="go(true)">إعادة المحاولة</button><div id="st"></div></div>
+<script>
+var SITE='https://abdoalradad-cmd.github.io/novel_site/',busy=false,n=0;
+function st(t){document.getElementById('st').textContent=t}
+/* بنتأكد إن الموقع نفسه بيرد قبل ما نروح له، ولو لأ نفضل صفحة الانتظار (مش صفحة localhost) */
+function go(manual){
+  if(busy)return;busy=true;var b=document.getElementById('b');b.disabled=true;st('جاري المحاولة…');
+  var done=false,t=setTimeout(function(){if(!done){done=true;fail(manual)}},7000);
+  fetch(SITE+'sw.js?_='+Date.now(),{mode:'no-cors',cache:'no-store'}).then(function(){
+    if(done)return;done=true;clearTimeout(t);location.replace(SITE);
+  }).catch(function(){if(done)return;done=true;clearTimeout(t);fail(manual)});
+}
+function fail(manual){busy=false;document.getElementById('b').disabled=false;st(manual?'لسه مفيش اتصال — جرّب تاني بعد شوية':'بنستنى النت…')}
+window.addEventListener('online',function(){go(false)});
+setInterval(function(){if(navigator.onLine!==false)go(false)},6000);
+</script>
 </body></html>
