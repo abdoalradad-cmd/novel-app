@@ -313,6 +313,13 @@ async function route(request, env) {
     await env.DB.prepare('INSERT INTO reads (k,n) VALUES (?,1) ON CONFLICT(k) DO UPDATE SET n=n+1').bind(k).run();
     return json({ ok: true });
   }
+  if (path === '/api/authors' && m === 'GET') {
+    const { results: us } = await env.DB.prepare("SELECT id,name,role,avatar,bio,links,created_at FROM users WHERE role='admin' OR id IN (SELECT user_id FROM novels WHERE is_live=1) ORDER BY id").all();
+    const total = (await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first()).n;
+    const { results: fc } = await env.DB.prepare('SELECT author_id, COUNT(*) AS n FROM follows GROUP BY author_id').all();
+    const fm = {}; for (const r of fc) fm[r.author_id] = r.n;
+    return json({ authors: us.map((u) => ({ id: u.id, name: u.name, avatar: u.avatar, bio: u.bio, links: linksOf(u.links), isAdmin: u.role === 'admin', joinedAt: u.created_at, followers: u.role === 'admin' ? Math.max(0, total - 1) : (fm[u.id] || 0) })) }, 200, { 'Cache-Control': 'public, max-age=30' });
+  }
   if ((g = /^\/api\/authors\/(\d+|admin)$/.exec(path)) && m === 'GET') {
     let aid;
     if (g[1] === 'admin') { const a = await env.DB.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").first(); if (!a) return fail('غير موجود', 404); aid = a.id; } else aid = +g[1];
