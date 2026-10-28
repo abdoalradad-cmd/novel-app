@@ -199,4 +199,23 @@ public class AppNativePlugin extends Plugin {
         }
         super.handleOnDestroy();
     }
+
+    // الاشتراك في موضوع إشعارات (مثلاً متابعة كاتب) — يتجاهل بهدوء لو Firebase غير مفعّل
+    @PluginMethod
+    public void subscribeTopic(PluginCall call) {
+        try {
+            String t = call.getString("topic");
+            if (t != null && t.matches("[a-zA-Z0-9-_.~%]{1,900}")) com.google.firebase.messaging.FirebaseMessaging.getInstance().subscribeToTopic(t);
+        } catch (Throwable e) { }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void unsubscribeTopic(PluginCall call) {
+        try {
+            String t = call.getString("topic");
+            if (t != null && t.matches("[a-zA-Z0-9-_.~%]{1,900}")) com.google.firebase.messaging.FirebaseMessaging.getInstance().unsubscribeFromTopic(t);
+        } catch (Throwable e) { }
+        call.resolve();
+    }
 }
