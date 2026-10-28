@@ -70,24 +70,29 @@ async function authUser(env, request) {
   const h = request.headers.get('Authorization') || '';
   const m = /^Bearer (.+)$/.exec(h); if (!m) return null;
   const p = await readToken(env, m[1]); if (!p) return null;
-  return env.DB.prepare('SELECT id,email,name,role,premium_until FROM users WHERE id=?').bind(p.uid).first();
+  return env.DB.prepare('SELECT id,email,name,role,premium_until,avatar,bio FROM users WHERE id=?').bind(p.uid).first();
 }
 const FOREVER = 32503680000000;
 const isPremium = (u) => !!u && (u.role === 'admin' || (u.premium_until || 0) > Date.now());
-const userOut = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, premium: isPremium(u), premiumUntil: u.role === 'admin' ? FOREVER : (u.premium_until || 0) });
+const userOut = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, premium: isPremium(u), premiumUntil: u.role === 'admin' ? FOREVER : (u.premium_until || 0), avatar: u.avatar || '', bio: u.bio || '' });
 
 /* ---------- ترقية القاعدة تلقائيًا (للقواعد القديمة) ---------- */
 let migrated = false;
 async function ensureSchema(env) {
   if (migrated) return;
-  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until']];
+  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio']];
   for (const [t, c] of need) {
     try { await env.DB.prepare(`SELECT ${c} FROM ${t} LIMIT 1`).first(); }
     catch (e) {
-      const def = (c === 'locked' || c === 'premium_until') ? 'INTEGER NOT NULL DEFAULT 0' : "TEXT NOT NULL DEFAULT '{}'";
+      const def = (c === 'locked' || c === 'premium_until') ? 'INTEGER NOT NULL DEFAULT 0' : (c === 'avatar' || c === 'bio') ? "TEXT NOT NULL DEFAULT ''" : "TEXT NOT NULL DEFAULT '{}'";
       await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`).run();
     }
   }
+  for (const q of ['CREATE TABLE IF NOT EXISTS follows (follower_id INTEGER NOT NULL, author_id INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (follower_id, author_id))',
+    'CREATE INDEX IF NOT EXISTS idx_follows_author ON follows(author_id)',
+    'CREATE TABLE IF NOT EXISTS reads (k TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0)',
+    'CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL, kind TEXT NOT NULL, novel_id INTEGER NOT NULL, title TEXT NOT NULL, ts INTEGER NOT NULL)',
+    'CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)']) await env.DB.prepare(q).run();
   migrated = true;
 }
 
@@ -136,7 +141,7 @@ function cleanNovel(b) {
   if ((lockAll || anyLocked) && !password) throw new Error('اكتب باسورد القفل أو شيل القفل');
   const extra = { subtitle: str(b.subtitle, LIM.subtitle).trim(), novelStatus: b.novelStatus === 'مكتملة' ? 'مكتملة' : 'مستمرة',
     promoUrl: cleanUrl(b.promoUrl), pdfUrl: cleanUrl(b.pdfUrl), grad: GRADS.includes(b.grad) ? b.grad : GRADS[0],
-    icon: ICONS.includes(b.icon) ? b.icon : 'fa-book', allowSharing: b.allowSharing !== false, password, lockAll };
+    icon: ICONS.includes(b.icon) ? b.icon : 'fa-book', allowSharing: b.allowSharing !== false, password, lockAll, lockPdf: b.lockPdf !== false };
   return { title, author: str(b.author, LIM.author).trim(), genre: str(b.genre, LIM.genre).trim() || 'عام',
     tags, synopsis: str(b.synopsis, LIM.synopsis), cover: cleanUrl(b.cover), extra: JSON.stringify(extra), chapters: chs };
 }
@@ -160,7 +165,7 @@ function chapterStmts(env, id, ver, chs) {
 function extraOf(raw) {
   const x = parseJson(raw);
   return { subtitle: x.subtitle || '', novelStatus: x.novelStatus || 'مستمرة', promoUrl: x.promoUrl || '', pdfUrl: x.pdfUrl || '', grad: GRADS.includes(x.grad) ? x.grad : GRADS[0],
-    icon: ICONS.includes(x.icon) ? x.icon : 'fa-book', allowSharing: x.allowSharing !== false, password: x.password || '', lockAll: !!x.lockAll };
+    icon: ICONS.includes(x.icon) ? x.icon : 'fa-book', allowSharing: x.allowSharing !== false, password: x.password || '', lockAll: !!x.lockAll, lockPdf: x.lockPdf !== false };
 }
 function myNovelRow(r) {
   return { id: r.id, status: r.status, isLive: !!r.is_live, rejectReason: r.reject_reason, updatedAt: r.updated_at, publishedAt: r.published_at,
@@ -193,11 +198,11 @@ async function fcmAccessToken(sa) {
   if (!j.access_token) throw new Error('فشل الاتصال بـ Firebase: ' + (j.error_description || j.error || ''));
   return j.access_token;
 }
-async function sendPush(env, title, text, link) {
+async function sendPush(env, title, text, link, topic) {
   if (!env.FCM_SA) throw new Error('إشعارات الموبايل مش متفعّلة لسه (محتاجة ملف Firebase — راجع الشرح)');
   let sa; try { sa = JSON.parse(env.FCM_SA); } catch (e) { throw new Error('ملف Firebase المحفوظ غير صحيح'); }
   const token = await fcmAccessToken(sa);
-  const msg = { message: { topic: 'all', notification: { title: title || 'RadPad', body: text || '' }, data: { url: link || '' }, android: { priority: 'HIGH', notification: { channel_id: 'radpad_alerts', sound: 'default' } } } };
+  const msg = { message: { topic: topic || 'all', notification: { title: title || 'RadPad', body: text || '' }, data: { url: link || '' }, android: { priority: 'HIGH', notification: { channel_id: 'radpad_alerts', sound: 'default' } } } };
   const r = await fetch('https://fcm.googleapis.com/v1/projects/' + sa.project_id + '/messages:send', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(msg) });
   if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error('رفض Firebase الإرسال: ' + ((j.error && j.error.message) || r.status)); }
 }
@@ -242,7 +247,7 @@ async function route(request, env) {
     const email = str(b.email, 120).trim().toLowerCase();
     const key = 'login:' + email + ':' + ip;
     if (await tooMany(env, key, 10, 900000)) return fail('محاولات كتير، استنى ربع ساعة وجرّب تاني', 429);
-    const u = await env.DB.prepare('SELECT id,email,name,role,pass_hash,premium_until FROM users WHERE email=?').bind(email).first();
+    const u = await env.DB.prepare('SELECT id,email,name,role,pass_hash,premium_until,avatar,bio FROM users WHERE email=?').bind(email).first();
     if (!u || !(await checkPassword(String(b.password || ''), u.pass_hash))) { await noteAttempt(env, key); return fail('الإيميل أو الباسورد غلط', 401); }
     return json({ token: await makeToken(env, u.id), user: userOut(u) });
   }
@@ -250,17 +255,18 @@ async function route(request, env) {
   /* ----- عام: الروايات المعتمدة ----- */
   if (path === '/api/novels' && m === 'GET') {
     const { results } = await env.DB.prepare(
-      `SELECT n.id,n.l_title,n.l_author,n.l_genre,n.l_tags,n.l_synopsis,n.l_cover,n.l_extra,n.published_at,u.name AS owner
+      `SELECT n.id,n.user_id,n.l_title,n.l_author,n.l_genre,n.l_tags,n.l_synopsis,n.l_cover,n.l_extra,n.published_at,u.name AS owner
        FROM novels n JOIN users u ON u.id=n.user_id WHERE n.is_live=1 ORDER BY n.published_at DESC LIMIT 500`).all();
     const chs = (await env.DB.prepare(
       `SELECT c.novel_id,c.idx,c.title,c.locked FROM chapters c JOIN novels n ON n.id=c.novel_id WHERE n.is_live=1 AND c.ver='l' ORDER BY c.novel_id,c.idx`).all()).results;
     const byNovel = {};
-    chs.forEach((c) => { (byNovel[c.novel_id] = byNovel[c.novel_id] || []).push({ title: c.title, locked: !!c.locked }); });
+    const chapLocked = {};
+    chs.forEach((c) => { (byNovel[c.novel_id] = byNovel[c.novel_id] || []).push({ title: c.title, locked: !!c.locked }); if (c.locked) chapLocked[c.novel_id] = true; });
     return json({ novels: results.map((r) => {
       const x = extraOf(r.l_extra);
       return { id: r.id, title: r.l_title, subtitle: x.subtitle, author: r.l_author || r.owner, genre: r.l_genre, tags: parseTags(r.l_tags),
-        synopsis: r.l_synopsis, cover: r.l_cover, novelStatus: x.novelStatus, promoUrl: x.promoUrl, pdfUrl: x.pdfUrl, grad: x.grad, icon: x.icon, allowSharing: x.allowSharing, locked: !!(x.lockAll && x.password),
-        publishedAt: r.published_at, owner: r.owner, chapters: byNovel[r.id] || [] };
+        synopsis: r.l_synopsis, cover: r.l_cover, novelStatus: x.novelStatus, promoUrl: x.promoUrl, pdfUrl: x.pdfUrl, grad: x.grad, icon: x.icon, allowSharing: x.allowSharing, locked: !!(x.lockAll && x.password), pdfLocked: !!(x.password && x.lockPdf && (x.lockAll || chapLocked[r.id])),
+        publishedAt: r.published_at, owner: r.owner, uid: r.user_id, chapters: byNovel[r.id] || [] };
     }) }, 200, { 'Cache-Control': 'public, max-age=60' });
   }
   if ((g = /^\/api\/novels\/(\d+)\/unlock$/.exec(path)) && m === 'POST') {
@@ -293,6 +299,33 @@ async function route(request, env) {
     return json({ chapters }, 200, { 'Cache-Control': x.password ? 'private, no-store' : 'public, max-age=300' });
   }
 
+  if (path === '/api/reads' && m === 'GET') {
+    const { results } = await env.DB.prepare('SELECT k,n FROM reads ORDER BY n DESC LIMIT 300').all();
+    const o = {}; results.forEach((r) => { o[r.k] = r.n; });
+    return json({ reads: o }, 200, { 'Cache-Control': 'public, max-age=60' });
+  }
+  if (path === '/api/reads' && m === 'POST') {
+    const b = await body(request, 2000), k = str(b.k, 60);
+    if (!/^[A-Za-z0-9_-]{1,60}$/.test(k)) return fail('مفتاح غير صحيح');
+    if (await tooMany(env, 'rd:' + ip + ':' + k, 1, 6 * 3600000) || await tooMany(env, 'rdip:' + ip, 40, 3600000)) return json({ ok: true, skipped: true });
+    await noteAttempt(env, 'rd:' + ip + ':' + k); await noteAttempt(env, 'rdip:' + ip);
+    await env.DB.prepare('INSERT INTO reads (k,n) VALUES (?,1) ON CONFLICT(k) DO UPDATE SET n=n+1').bind(k).run();
+    return json({ ok: true });
+  }
+  if ((g = /^\/api\/authors\/(\d+|admin)$/.exec(path)) && m === 'GET') {
+    let aid;
+    if (g[1] === 'admin') { const a = await env.DB.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").first(); if (!a) return fail('غير موجود', 404); aid = a.id; } else aid = +g[1];
+    const a = await env.DB.prepare('SELECT id,name,role,avatar,bio,created_at FROM users WHERE id=?').bind(aid).first();
+    if (!a) return fail('الكاتب غير موجود', 404);
+    const isAdm = a.role === 'admin';
+    const followers = isAdm ? Math.max(0, (await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first()).n - 1) : (await env.DB.prepare('SELECT COUNT(*) AS n FROM follows WHERE author_id=?').bind(aid).first()).n;
+    const { results } = await env.DB.prepare('SELECT n.id,n.l_title,n.l_author,n.l_genre,n.l_cover,n.l_extra,n.published_at FROM novels n WHERE n.user_id=? AND n.is_live=1 ORDER BY n.published_at DESC').bind(aid).all();
+    let me = null, following = false;
+    if (request.headers.get('Authorization')) { me = await authUser(env, request); }
+    if (me) following = isAdm ? me.id !== aid : !!(await env.DB.prepare('SELECT 1 FROM follows WHERE follower_id=? AND author_id=?').bind(me.id, aid).first());
+    return json({ author: { id: a.id, name: a.name, bio: a.bio, avatar: a.avatar, isAdmin: isAdm, joinedAt: a.created_at, followers, following, self: !!(me && me.id === aid),
+      novels: results.map((r) => { const x = extraOf(r.l_extra); return { id: r.id, title: r.l_title, author: r.l_author || a.name, genre: r.l_genre, cover: r.l_cover, grad: x.grad, icon: x.icon, locked: !!(x.lockAll && x.password), publishedAt: r.published_at }; }) } }, 200, { 'Cache-Control': 'private, no-store' });
+  }
   if (path === '/api/premium-info' && m === 'GET') return json({ info: await getPremiumInfo(env) }, 200, { 'Cache-Control': 'public, max-age=30' });
 
   /* ----- كل ما بعد كده يحتاج تسجيل دخول ----- */
@@ -301,10 +334,12 @@ async function route(request, env) {
 
   if (path === '/api/me' && m === 'GET') return json({ user: userOut(user) });
   if (path === '/api/me' && m === 'PUT') {
-    const b = await body(request), name = str(b.name, 40).trim();
+    const b = await body(request), name = b.name === undefined ? user.name : str(b.name, 40).trim();
     if (name.length < 2) return fail('اكتب اسمك (حرفين على الأقل)');
-    await env.DB.prepare('UPDATE users SET name=? WHERE id=?').bind(name, user.id).run();
-    return json({ user: userOut({ ...user, name }) });
+    const bio = b.bio === undefined ? user.bio : str(b.bio, 300).trim();
+    const avatar = b.avatar === undefined ? user.avatar : cleanUrl(b.avatar);
+    await env.DB.prepare('UPDATE users SET name=?,bio=?,avatar=? WHERE id=?').bind(name, bio, avatar, user.id).run();
+    return json({ user: userOut({ ...user, name, bio, avatar }) });
   }
   if (path === '/api/password' && m === 'PUT') {
     const b = await body(request);
@@ -316,6 +351,28 @@ async function route(request, env) {
     return json({ ok: true });
   }
 
+  if ((g = /^\/api\/follow\/(\d+)$/.exec(path)) && (m === 'POST' || m === 'DELETE')) {
+    const aid = +g[1];
+    if (aid === user.id) return fail('مينفعش تتابع نفسك');
+    const a = await env.DB.prepare('SELECT id,role FROM users WHERE id=?').bind(aid).first();
+    if (!a) return fail('الكاتب غير موجود', 404);
+    if (a.role === 'admin') return fail('متابعة صفحة الأدمن تلقائية ومينفعش تتلغي');
+    if (m === 'POST') await env.DB.prepare('INSERT OR IGNORE INTO follows (follower_id,author_id,ts) VALUES (?,?,?)').bind(user.id, aid, Date.now()).run();
+    else await env.DB.prepare('DELETE FROM follows WHERE follower_id=? AND author_id=?').bind(user.id, aid).run();
+    const n = (await env.DB.prepare('SELECT COUNT(*) AS n FROM follows WHERE author_id=?').bind(aid).first()).n;
+    return json({ ok: true, followers: n, following: m === 'POST' });
+  }
+  if (path === '/api/me/follows' && m === 'GET') {
+    const { results } = await env.DB.prepare('SELECT author_id FROM follows WHERE follower_id=?').bind(user.id).all();
+    const adm = await env.DB.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").first();
+    return json({ ids: results.map((r) => r.author_id), adminId: adm ? adm.id : 0 });
+  }
+  if (path === '/api/me/feed' && m === 'GET') {
+    const adm = await env.DB.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").first();
+    const { results } = await env.DB.prepare(`SELECT e.id,e.kind,e.author_id,e.novel_id,e.title,e.ts,u.name AS author FROM events e JOIN users u ON u.id=e.author_id
+      WHERE (e.author_id IN (SELECT author_id FROM follows WHERE follower_id=?) OR e.author_id=?) AND e.author_id<>? ORDER BY e.ts DESC LIMIT 40`).bind(user.id, adm ? adm.id : 0, user.id).all();
+    return json({ items: results.map((e) => ({ id: e.id, kind: e.kind, authorId: e.author_id, author: e.author, novelId: e.novel_id, title: e.title, ts: e.ts })) });
+  }
   if (path === '/api/premium/keys' && m === 'GET') {
     if (!isPremium(user)) return fail('للمشتركين فقط', 403);
     const v = await getSetting(env, 'vault');
@@ -388,10 +445,23 @@ async function route(request, env) {
       const r = await env.DB.prepare('SELECT * FROM novels WHERE id=?').bind(id).first();
       if (!r) return fail('غير موجودة', 404);
       const now = Date.now();
+      const oldCnt = r.is_live ? (await env.DB.prepare("SELECT COUNT(*) AS n FROM chapters WHERE novel_id=? AND ver='l'").bind(id).first()).n : 0;
       await env.DB.batch([
         env.DB.prepare('UPDATE novels SET l_title=d_title,l_author=d_author,l_genre=d_genre,l_tags=d_tags,l_synopsis=d_synopsis,l_cover=d_cover,l_extra=d_extra,is_live=1,status=?,reject_reason=?,published_at=COALESCE(published_at,?),updated_at=? WHERE id=?').bind('approved', '', now, now, id),
         env.DB.prepare("DELETE FROM chapters WHERE novel_id=? AND ver='l'").bind(id),
         env.DB.prepare("INSERT INTO chapters (novel_id,ver,idx,title,content,locked) SELECT novel_id,'l',idx,title,content,locked FROM chapters WHERE novel_id=? AND ver='d'").bind(id)]);
+      try {
+        const newCnt = (await env.DB.prepare("SELECT COUNT(*) AS n FROM chapters WHERE novel_id=? AND ver='l'").bind(id).first()).n;
+        const kind = !r.is_live ? 'novel' : (newCnt > oldCnt ? 'chapter' : '');
+        if (kind) {
+          const au = await env.DB.prepare('SELECT id,name,role FROM users WHERE id=?').bind(r.user_id).first();
+          await env.DB.prepare('INSERT INTO events (author_id,kind,novel_id,title,ts) VALUES (?,?,?,?,?)').bind(r.user_id, kind, id, r.d_title, now).run();
+          if (env.FCM_SA && au) {
+            const last = kind === 'chapter' ? (await env.DB.prepare("SELECT title FROM chapters WHERE novel_id=? AND ver='l' ORDER BY idx DESC LIMIT 1").bind(id).first()) : null;
+            await sendPush(env, kind === 'novel' ? 'رواية جديدة من ' + au.name : 'فصل جديد من ' + au.name, '«' + r.d_title + '»' + (last ? ' — ' + last.title : ''), '', au.role === 'admin' ? 'all' : 'a_' + au.id);
+          }
+        }
+      } catch (e) { /* الإشعار best-effort */ }
       return json({ ok: true });
     }
     if ((g = /^\/api\/admin\/novels\/(\d+)\/reject$/.exec(path)) && m === 'POST') {
@@ -405,19 +475,22 @@ async function route(request, env) {
     }
     if (path === '/api/admin/backup' && m === 'GET') {
       const all = async (t) => (await env.DB.prepare('SELECT * FROM ' + t).all()).results;
-      return json({ app: 'radpad', version: 2, createdAt: Date.now(), users: await all('users'), novels: await all('novels'), chapters: await all('chapters') });
+      return json({ app: 'radpad', version: 3, createdAt: Date.now(), users: await all('users'), novels: await all('novels'), chapters: await all('chapters'), follows: await all('follows'), reads: await all('reads') });
     }
     if (path === '/api/admin/restore' && m === 'POST') {
       const b = await body(request, 40000000);
       if (!b || b.app !== 'radpad' || !Array.isArray(b.users) || !Array.isArray(b.novels) || !Array.isArray(b.chapters)) return fail('ملف النسخة الاحتياطية غير صحيح');
       const cols = {
-        users: ['id', 'email', 'name', 'pass_hash', 'role', 'created_at', 'premium_until'],
+        users: ['id', 'email', 'name', 'pass_hash', 'role', 'created_at', 'premium_until', 'avatar', 'bio'],
         novels: ['id', 'user_id', 'status', 'is_live', 'reject_reason', 'created_at', 'updated_at', 'published_at', 'd_title', 'd_author', 'd_genre', 'd_tags', 'd_synopsis', 'd_cover', 'd_extra', 'l_title', 'l_author', 'l_genre', 'l_tags', 'l_synopsis', 'l_cover', 'l_extra'],
-        chapters: ['novel_id', 'ver', 'idx', 'title', 'content', 'locked']
+        chapters: ['novel_id', 'ver', 'idx', 'title', 'content', 'locked'],
+        follows: ['follower_id', 'author_id', 'ts'],
+        reads: ['k', 'n']
       };
-      const dflt = { d_extra: '{}', l_extra: '{}', locked: 0, premium_until: 0 };
+      const dflt = { d_extra: '{}', l_extra: '{}', locked: 0, premium_until: 0, avatar: '', bio: '', ts: 0, n: 0 };
       const stmts = [];
-      for (const t of ['users', 'novels', 'chapters']) {
+      for (const t of ['users', 'novels', 'chapters', 'follows', 'reads']) {
+        if (!Array.isArray(b[t])) continue;
         const c = cols[t], q = `INSERT OR REPLACE INTO ${t} (${c.join(',')}) VALUES (${c.map(() => '?').join(',')})`;
         for (const row of b[t]) stmts.push(env.DB.prepare(q).bind(...c.map((k) => (row[k] === undefined || row[k] === null ? (k in dflt ? dflt[k] : null) : row[k]))));
       }
@@ -435,7 +508,7 @@ async function route(request, env) {
       Object.keys(b.keys || {}).slice(0, 2000).forEach((id) => {
         const k = b.keys[id] || {}, c = {};
         Object.keys(k.c || {}).slice(0, 500).forEach((i) => { c[str(i, 6)] = str(k.c[i], 80); });
-        keys[str(id, 60)] = { n: str(k.n, 80), c };
+        keys[str(id, 60)] = { n: str(k.n, 80), p: str(k.p, 80), c };
       });
       await setSetting(env, 'vault', { keys, at: Date.now() });
       return json({ ok: true, count: Object.keys(keys).length });
