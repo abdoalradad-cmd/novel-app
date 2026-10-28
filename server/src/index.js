@@ -70,17 +70,18 @@ async function authUser(env, request) {
   const h = request.headers.get('Authorization') || '';
   const m = /^Bearer (.+)$/.exec(h); if (!m) return null;
   const p = await readToken(env, m[1]); if (!p) return null;
-  return env.DB.prepare('SELECT id,email,name,role,premium_until,avatar,bio FROM users WHERE id=?').bind(p.uid).first();
+  return env.DB.prepare('SELECT id,email,name,role,premium_until,avatar,bio,links FROM users WHERE id=?').bind(p.uid).first();
 }
+const linksOf = (v) => { let o = {}; try { o = typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}); } catch (e) {} const out = {}; for (const k of ['facebook', 'wattpad', 'youtube']) out[k] = (typeof o[k] === 'string') ? cleanUrl(o[k]) : ''; return out; };
 const FOREVER = 32503680000000;
 const isPremium = (u) => !!u && (u.role === 'admin' || (u.premium_until || 0) > Date.now());
-const userOut = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, premium: isPremium(u), premiumUntil: u.role === 'admin' ? FOREVER : (u.premium_until || 0), avatar: u.avatar || '', bio: u.bio || '' });
+const userOut = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, premium: isPremium(u), premiumUntil: u.role === 'admin' ? FOREVER : (u.premium_until || 0), avatar: u.avatar || '', bio: u.bio || '', links: linksOf(u.links) });
 
 /* ---------- ترقية القاعدة تلقائيًا (للقواعد القديمة) ---------- */
 let migrated = false;
 async function ensureSchema(env) {
   if (migrated) return;
-  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio']];
+  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio'], ['users', 'links']];
   for (const [t, c] of need) {
     try { await env.DB.prepare(`SELECT ${c} FROM ${t} LIMIT 1`).first(); }
     catch (e) {
@@ -247,7 +248,7 @@ async function route(request, env) {
     const email = str(b.email, 120).trim().toLowerCase();
     const key = 'login:' + email + ':' + ip;
     if (await tooMany(env, key, 10, 900000)) return fail('محاولات كتير، استنى ربع ساعة وجرّب تاني', 429);
-    const u = await env.DB.prepare('SELECT id,email,name,role,pass_hash,premium_until,avatar,bio FROM users WHERE email=?').bind(email).first();
+    const u = await env.DB.prepare('SELECT id,email,name,role,pass_hash,premium_until,avatar,bio,links FROM users WHERE email=?').bind(email).first();
     if (!u || !(await checkPassword(String(b.password || ''), u.pass_hash))) { await noteAttempt(env, key); return fail('الإيميل أو الباسورد غلط', 401); }
     return json({ token: await makeToken(env, u.id), user: userOut(u) });
   }
@@ -315,7 +316,7 @@ async function route(request, env) {
   if ((g = /^\/api\/authors\/(\d+|admin)$/.exec(path)) && m === 'GET') {
     let aid;
     if (g[1] === 'admin') { const a = await env.DB.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").first(); if (!a) return fail('غير موجود', 404); aid = a.id; } else aid = +g[1];
-    const a = await env.DB.prepare('SELECT id,name,role,avatar,bio,created_at FROM users WHERE id=?').bind(aid).first();
+    const a = await env.DB.prepare('SELECT id,name,role,avatar,bio,links,created_at FROM users WHERE id=?').bind(aid).first();
     if (!a) return fail('الكاتب غير موجود', 404);
     const isAdm = a.role === 'admin';
     const followers = isAdm ? Math.max(0, (await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first()).n - 1) : (await env.DB.prepare('SELECT COUNT(*) AS n FROM follows WHERE author_id=?').bind(aid).first()).n;
@@ -323,7 +324,7 @@ async function route(request, env) {
     let me = null, following = false;
     if (request.headers.get('Authorization')) { me = await authUser(env, request); }
     if (me) following = isAdm ? me.id !== aid : !!(await env.DB.prepare('SELECT 1 FROM follows WHERE follower_id=? AND author_id=?').bind(me.id, aid).first());
-    return json({ author: { id: a.id, name: a.name, bio: a.bio, avatar: a.avatar, isAdmin: isAdm, joinedAt: a.created_at, followers, following, self: !!(me && me.id === aid),
+    return json({ author: { id: a.id, name: a.name, bio: a.bio, links: linksOf(a.links), avatar: a.avatar, isAdmin: isAdm, joinedAt: a.created_at, followers, following, self: !!(me && me.id === aid),
       novels: results.map((r) => { const x = extraOf(r.l_extra); return { id: r.id, title: r.l_title, author: r.l_author || a.name, genre: r.l_genre, cover: r.l_cover, grad: x.grad, icon: x.icon, locked: !!(x.lockAll && x.password), publishedAt: r.published_at }; }) } }, 200, { 'Cache-Control': 'private, no-store' });
   }
   if (path === '/api/premium-info' && m === 'GET') return json({ info: await getPremiumInfo(env) }, 200, { 'Cache-Control': 'public, max-age=30' });
@@ -338,8 +339,9 @@ async function route(request, env) {
     if (name.length < 2) return fail('اكتب اسمك (حرفين على الأقل)');
     const bio = b.bio === undefined ? user.bio : str(b.bio, 300).trim();
     const avatar = b.avatar === undefined ? user.avatar : cleanUrl(b.avatar);
-    await env.DB.prepare('UPDATE users SET name=?,bio=?,avatar=? WHERE id=?').bind(name, bio, avatar, user.id).run();
-    return json({ user: userOut({ ...user, name, bio, avatar }) });
+    const links = b.links === undefined ? user.links : JSON.stringify(linksOf(b.links));
+    await env.DB.prepare('UPDATE users SET name=?,bio=?,avatar=?,links=? WHERE id=?').bind(name, bio, avatar, links, user.id).run();
+    return json({ user: userOut({ ...user, name, bio, avatar, links }) });
   }
   if (path === '/api/password' && m === 'PUT') {
     const b = await body(request);
@@ -481,13 +483,13 @@ async function route(request, env) {
       const b = await body(request, 40000000);
       if (!b || b.app !== 'radpad' || !Array.isArray(b.users) || !Array.isArray(b.novels) || !Array.isArray(b.chapters)) return fail('ملف النسخة الاحتياطية غير صحيح');
       const cols = {
-        users: ['id', 'email', 'name', 'pass_hash', 'role', 'created_at', 'premium_until', 'avatar', 'bio'],
+        users: ['id', 'email', 'name', 'pass_hash', 'role', 'created_at', 'premium_until', 'avatar', 'bio', 'links'],
         novels: ['id', 'user_id', 'status', 'is_live', 'reject_reason', 'created_at', 'updated_at', 'published_at', 'd_title', 'd_author', 'd_genre', 'd_tags', 'd_synopsis', 'd_cover', 'd_extra', 'l_title', 'l_author', 'l_genre', 'l_tags', 'l_synopsis', 'l_cover', 'l_extra'],
         chapters: ['novel_id', 'ver', 'idx', 'title', 'content', 'locked'],
         follows: ['follower_id', 'author_id', 'ts'],
         reads: ['k', 'n']
       };
-      const dflt = { d_extra: '{}', l_extra: '{}', locked: 0, premium_until: 0, avatar: '', bio: '', ts: 0, n: 0 };
+      const dflt = { d_extra: '{}', l_extra: '{}', locked: 0, premium_until: 0, avatar: '', bio: '', links: '{}', ts: 0, n: 0 };
       const stmts = [];
       for (const t of ['users', 'novels', 'chapters', 'follows', 'reads']) {
         if (!Array.isArray(b[t])) continue;
@@ -545,7 +547,7 @@ async function route(request, env) {
       const r = await env.DB.prepare('SELECT n.*,u.name AS owner FROM novels n JOIN users u ON u.id=n.user_id WHERE n.id=? AND n.is_live=1').bind(+g[1]).first();
       if (!r) return fail('الرواية مش منشورة', 404);
       const { results } = await env.DB.prepare("SELECT title,content,locked FROM chapters WHERE novel_id=? AND ver='l' ORDER BY idx").bind(+g[1]).all();
-      return json({ novel: { ...liveNovelRow(r), owner: r.owner, chapters: results.map((c) => ({ title: c.title, content: c.content, locked: !!c.locked })) } });
+      return json({ novel: { ...liveNovelRow(r), owner: r.owner, uid: r.user_id, chapters: results.map((c) => ({ title: c.title, content: c.content, locked: !!c.locked })) } });
     }
     if ((g = /^\/api\/admin\/novels\/(\d+)$/.exec(path)) && m === 'DELETE') {
       await env.DB.batch([env.DB.prepare('DELETE FROM chapters WHERE novel_id=?').bind(+g[1]), env.DB.prepare('DELETE FROM novels WHERE id=?').bind(+g[1])]);
