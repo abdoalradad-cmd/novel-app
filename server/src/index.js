@@ -81,11 +81,11 @@ const userOut = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, 
 let migrated = false;
 async function ensureSchema(env) {
   if (migrated) return;
-  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio'], ['users', 'links']];
+  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio'], ['users', 'links'], ['novels', 'hidden']];
   for (const [t, c] of need) {
     try { await env.DB.prepare(`SELECT ${c} FROM ${t} LIMIT 1`).first(); }
     catch (e) {
-      const def = (c === 'locked' || c === 'premium_until') ? 'INTEGER NOT NULL DEFAULT 0' : (c === 'avatar' || c === 'bio') ? "TEXT NOT NULL DEFAULT ''" : "TEXT NOT NULL DEFAULT '{}'";
+      const def = (c === 'locked' || c === 'premium_until' || c === 'hidden') ? 'INTEGER NOT NULL DEFAULT 0' : (c === 'avatar' || c === 'bio') ? "TEXT NOT NULL DEFAULT ''" : "TEXT NOT NULL DEFAULT '{}'";
       await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`).run();
     }
   }
@@ -93,7 +93,9 @@ async function ensureSchema(env) {
     'CREATE INDEX IF NOT EXISTS idx_follows_author ON follows(author_id)',
     'CREATE TABLE IF NOT EXISTS reads (k TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0)',
     'CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL, kind TEXT NOT NULL, novel_id INTEGER NOT NULL, title TEXT NOT NULL, ts INTEGER NOT NULL)',
-    'CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)']) await env.DB.prepare(q).run();
+    'CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)',
+    'CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, kind TEXT NOT NULL, novel_ref TEXT NOT NULL, who TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, ts INTEGER NOT NULL)',
+    'CREATE INDEX IF NOT EXISTS idx_notes_uid ON notes(uid, ts)']) await env.DB.prepare(q).run();
   migrated = true;
 }
 
@@ -169,7 +171,7 @@ function extraOf(raw) {
     icon: ICONS.includes(x.icon) ? x.icon : 'fa-book', allowSharing: x.allowSharing !== false, password: x.password || '', lockAll: !!x.lockAll, lockPdf: x.lockPdf !== false };
 }
 function myNovelRow(r) {
-  return { id: r.id, status: r.status, isLive: !!r.is_live, rejectReason: r.reject_reason, updatedAt: r.updated_at, publishedAt: r.published_at,
+  return { id: r.id, status: r.status, isLive: !!r.is_live, hidden: !!r.hidden, rejectReason: r.reject_reason, updatedAt: r.updated_at, publishedAt: r.published_at,
     title: r.d_title, author: r.d_author, genre: r.d_genre, tags: parseTags(r.d_tags), synopsis: r.d_synopsis, cover: r.d_cover, ...extraOf(r.d_extra) };
 }
 function liveNovelRow(r) {
@@ -257,9 +259,9 @@ async function route(request, env) {
   if (path === '/api/novels' && m === 'GET') {
     const { results } = await env.DB.prepare(
       `SELECT n.id,n.user_id,n.l_title,n.l_author,n.l_genre,n.l_tags,n.l_synopsis,n.l_cover,n.l_extra,n.published_at,u.name AS owner
-       FROM novels n JOIN users u ON u.id=n.user_id WHERE n.is_live=1 ORDER BY n.published_at DESC LIMIT 500`).all();
+       FROM novels n JOIN users u ON u.id=n.user_id WHERE n.is_live=1 AND n.hidden=0 ORDER BY n.published_at DESC LIMIT 500`).all();
     const chs = (await env.DB.prepare(
-      `SELECT c.novel_id,c.idx,c.title,c.locked FROM chapters c JOIN novels n ON n.id=c.novel_id WHERE n.is_live=1 AND c.ver='l' ORDER BY c.novel_id,c.idx`).all()).results;
+      `SELECT c.novel_id,c.idx,c.title,c.locked FROM chapters c JOIN novels n ON n.id=c.novel_id WHERE n.is_live=1 AND n.hidden=0 AND c.ver='l' ORDER BY c.novel_id,c.idx`).all()).results;
     const byNovel = {};
     const chapLocked = {};
     chs.forEach((c) => { (byNovel[c.novel_id] = byNovel[c.novel_id] || []).push({ title: c.title, locked: !!c.locked }); if (c.locked) chapLocked[c.novel_id] = true; });
@@ -274,14 +276,14 @@ async function route(request, env) {
     const id = +g[1], key = 'unl:' + ip + ':' + id;
     if (await tooMany(env, key, 10, 900000)) return fail('محاولات كتير، استنى شوية وجرّب تاني', 429);
     const b = await body(request);
-    const n = await env.DB.prepare('SELECT l_extra FROM novels WHERE id=? AND is_live=1').bind(id).first();
+    const n = await env.DB.prepare('SELECT l_extra FROM novels WHERE id=? AND is_live=1 AND hidden=0').bind(id).first();
     if (!n) return fail('الرواية غير موجودة', 404);
     const x = extraOf(n.l_extra);
     if (!x.password || !safeEqual(String(b.password || '').trim(), x.password)) { await noteAttempt(env, key); return fail('الباسورد غلط', 401); }
     return json({ token: await makeUnlock(env, id) });
   }
   if ((g = /^\/api\/novels\/(\d+)\/chapters\/(\d+)$/.exec(path)) && m === 'GET') {
-    const n = await env.DB.prepare('SELECT l_extra FROM novels WHERE id=? AND is_live=1').bind(+g[1]).first();
+    const n = await env.DB.prepare('SELECT l_extra FROM novels WHERE id=? AND is_live=1 AND hidden=0').bind(+g[1]).first();
     if (!n) return fail('الفصل غير موجود', 404);
     const c = await env.DB.prepare(`SELECT title,content,locked FROM chapters WHERE novel_id=? AND ver='l' AND idx=?`).bind(+g[1], +g[2]).first();
     if (!c) return fail('الفصل غير موجود', 404);
@@ -291,7 +293,7 @@ async function route(request, env) {
     return json({ title: c.title, content: c.content }, 200, { 'Cache-Control': locked ? 'private, no-store' : 'public, max-age=300' });
   }
   if ((g = /^\/api\/novels\/(\d+)\/full$/.exec(path)) && m === 'GET') {
-    const n = await env.DB.prepare('SELECT l_extra FROM novels WHERE id=? AND is_live=1').bind(+g[1]).first();
+    const n = await env.DB.prepare('SELECT l_extra FROM novels WHERE id=? AND is_live=1 AND hidden=0').bind(+g[1]).first();
     if (!n) return fail('الرواية غير موجودة', 404);
     const x = extraOf(n.l_extra);
     const open = !x.password || await hasUnlock(env, request, +g[1]);
@@ -314,7 +316,7 @@ async function route(request, env) {
     return json({ ok: true });
   }
   if (path === '/api/authors' && m === 'GET') {
-    const { results: us } = await env.DB.prepare("SELECT id,name,role,avatar,bio,links,created_at FROM users WHERE role='admin' OR id IN (SELECT user_id FROM novels WHERE is_live=1) ORDER BY id").all();
+    const { results: us } = await env.DB.prepare("SELECT id,name,role,avatar,bio,links,created_at FROM users WHERE role='admin' OR id IN (SELECT user_id FROM novels WHERE is_live=1 AND hidden=0) ORDER BY id").all();
     const total = (await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first()).n;
     const { results: fc } = await env.DB.prepare('SELECT author_id, COUNT(*) AS n FROM follows GROUP BY author_id').all();
     const fm = {}; for (const r of fc) fm[r.author_id] = r.n;
@@ -327,7 +329,7 @@ async function route(request, env) {
     if (!a) return fail('الكاتب غير موجود', 404);
     const isAdm = a.role === 'admin';
     const followers = isAdm ? Math.max(0, (await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first()).n - 1) : (await env.DB.prepare('SELECT COUNT(*) AS n FROM follows WHERE author_id=?').bind(aid).first()).n;
-    const { results } = await env.DB.prepare('SELECT n.id,n.l_title,n.l_author,n.l_genre,n.l_cover,n.l_extra,n.published_at FROM novels n WHERE n.user_id=? AND n.is_live=1 ORDER BY n.published_at DESC').bind(aid).all();
+    const { results } = await env.DB.prepare('SELECT n.id,n.l_title,n.l_author,n.l_genre,n.l_cover,n.l_extra,n.published_at FROM novels n WHERE n.user_id=? AND n.is_live=1 AND n.hidden=0 ORDER BY n.published_at DESC').bind(aid).all();
     let me = null, following = false;
     if (request.headers.get('Authorization')) { me = await authUser(env, request); }
     if (me) following = isAdm ? me.id !== aid : !!(await env.DB.prepare('SELECT 1 FROM follows WHERE follower_id=? AND author_id=?').bind(me.id, aid).first());
@@ -380,7 +382,43 @@ async function route(request, env) {
     const adm = await env.DB.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").first();
     const { results } = await env.DB.prepare(`SELECT e.id,e.kind,e.author_id,e.novel_id,e.title,e.ts,u.name AS author FROM events e JOIN users u ON u.id=e.author_id
       WHERE (e.author_id IN (SELECT author_id FROM follows WHERE follower_id=?) OR e.author_id=?) AND e.author_id<>? ORDER BY e.ts DESC LIMIT 40`).bind(user.id, adm ? adm.id : 0, user.id).all();
-    return json({ items: results.map((e) => ({ id: e.id, kind: e.kind, authorId: e.author_id, author: e.author, novelId: e.novel_id, title: e.title, ts: e.ts })) });
+    const { results: nts } = await env.DB.prepare('SELECT id,kind,novel_ref,who,title,text,ts FROM notes WHERE uid=? ORDER BY ts DESC LIMIT 40').bind(user.id).all();
+    const items = results.map((e) => ({ id: e.id, kind: e.kind, authorId: e.author_id, author: e.author, novelId: e.novel_id, title: e.title, ts: e.ts }))
+      .concat(nts.map((n) => ({ id: 'n' + n.id, kind: n.kind, novelRef: n.novel_ref, author: n.who, title: n.title, text: n.text, ts: n.ts })));
+    items.sort((a, b) => b.ts - a.ts);
+    return json({ items: items.slice(0, 60) });
+  }
+  /* ----- إشعار للكاتب لما حد يعلّق أو يقيّم ----- */
+  if (path === '/api/notify' && m === 'POST') {
+    const b = await body(request);
+    const ref = str(b.novel, 60), kind = b.kind === 'rating' ? 'rating' : 'comment';
+    if (!/^[A-Za-z0-9_-]{1,60}$/.test(ref)) return fail('رواية غير صحيحة');
+    if (await tooMany(env, 'ntf:' + user.id, 30, 3600000)) return fail('كتير أوي، استنى شوية');
+    await noteAttempt(env, 'ntf:' + user.id);
+    let target = 0;
+    const mm = /^u(\d+)$/.exec(ref);
+    if (mm) { const r0 = await env.DB.prepare('SELECT user_id FROM novels WHERE id=? AND is_live=1').bind(+mm[1]).first(); if (r0) target = r0.user_id; }
+    else {
+      const au = +b.authorUid || 0;
+      if (au) { const a0 = await env.DB.prepare("SELECT id FROM users WHERE id=? AND (role='admin' OR id IN (SELECT user_id FROM novels WHERE is_live=1))").bind(au).first(); if (a0) target = a0.id; }
+      if (!target) { const adm = await env.DB.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").first(); if (adm) target = adm.id; }
+    }
+    if (!target || target === user.id) return json({ ok: true, skipped: true });
+    const title = str(b.title, 120).trim(), stars = Math.max(1, Math.min(5, +b.stars || 5));
+    const snip = str(b.snippet, 400).trim().slice(0, 120);
+    const head = kind === 'rating' ? '⭐ تقييم جديد على روايتك' : '💬 تعليق جديد على روايتك';
+    const text = user.name + (kind === 'rating' ? ' قيّم «' + title + '» ' + stars + '/5' : ' علّق على «' + title + '»' + (b.stars ? ' (⭐ ' + stars + '/5)' : '') + (snip ? ': ' + snip : ''));
+    await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(target, kind, ref, user.name, head, text, Date.now()).run();
+    await env.DB.prepare('DELETE FROM notes WHERE ts < ?').bind(Date.now() - 60 * 86400000).run();
+    try { await sendPush(env, head, text, '', 'u_' + target); } catch (e) {}
+    return json({ ok: true });
+  }
+  if ((g = /^\/api\/my\/novels\/(\d+)\/visibility$/.exec(path)) && m === 'PUT') {
+    const b = await body(request);
+    const own = await env.DB.prepare('SELECT id FROM novels WHERE id=? AND user_id=?').bind(+g[1], user.id).first();
+    if (!own) return fail('الرواية مش موجودة', 404);
+    await env.DB.prepare('UPDATE novels SET hidden=? WHERE id=?').bind(b.hidden ? 1 : 0, +g[1]).run();
+    return json({ ok: true, hidden: !!b.hidden });
   }
   if (path === '/api/premium/keys' && m === 'GET') {
     if (!isPremium(user)) return fail('للمشتركين فقط', 403);
@@ -491,12 +529,12 @@ async function route(request, env) {
       if (!b || b.app !== 'radpad' || !Array.isArray(b.users) || !Array.isArray(b.novels) || !Array.isArray(b.chapters)) return fail('ملف النسخة الاحتياطية غير صحيح');
       const cols = {
         users: ['id', 'email', 'name', 'pass_hash', 'role', 'created_at', 'premium_until', 'avatar', 'bio', 'links'],
-        novels: ['id', 'user_id', 'status', 'is_live', 'reject_reason', 'created_at', 'updated_at', 'published_at', 'd_title', 'd_author', 'd_genre', 'd_tags', 'd_synopsis', 'd_cover', 'd_extra', 'l_title', 'l_author', 'l_genre', 'l_tags', 'l_synopsis', 'l_cover', 'l_extra'],
+        novels: ['id', 'user_id', 'status', 'is_live', 'hidden', 'reject_reason', 'created_at', 'updated_at', 'published_at', 'd_title', 'd_author', 'd_genre', 'd_tags', 'd_synopsis', 'd_cover', 'd_extra', 'l_title', 'l_author', 'l_genre', 'l_tags', 'l_synopsis', 'l_cover', 'l_extra'],
         chapters: ['novel_id', 'ver', 'idx', 'title', 'content', 'locked'],
         follows: ['follower_id', 'author_id', 'ts'],
         reads: ['k', 'n']
       };
-      const dflt = { d_extra: '{}', l_extra: '{}', locked: 0, premium_until: 0, avatar: '', bio: '', links: '{}', ts: 0, n: 0 };
+      const dflt = { d_extra: '{}', l_extra: '{}', locked: 0, hidden: 0, premium_until: 0, avatar: '', bio: '', links: '{}', ts: 0, n: 0 };
       const stmts = [];
       for (const t of ['users', 'novels', 'chapters', 'follows', 'reads']) {
         if (!Array.isArray(b[t])) continue;
