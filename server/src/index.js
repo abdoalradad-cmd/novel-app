@@ -368,7 +368,19 @@ async function route(request, env) {
     const a = await env.DB.prepare('SELECT id,role FROM users WHERE id=?').bind(aid).first();
     if (!a) return fail('الكاتب غير موجود', 404);
     if (a.role === 'admin') return fail('متابعة صفحة الأدمن تلقائية ومينفعش تتلغي');
-    if (m === 'POST') await env.DB.prepare('INSERT OR IGNORE INTO follows (follower_id,author_id,ts) VALUES (?,?,?)').bind(user.id, aid, Date.now()).run();
+    if (m === 'POST') {
+      const had = await env.DB.prepare('SELECT 1 FROM follows WHERE follower_id=? AND author_id=?').bind(user.id, aid).first();
+      await env.DB.prepare('INSERT OR IGNORE INTO follows (follower_id,author_id,ts) VALUES (?,?,?)').bind(user.id, aid, Date.now()).run();
+      if (!had) {
+        // إشعار للكاتب إن حد تابعه (مرة واحدة كل 24 ساعة لنفس الشخص)
+        const dup = await env.DB.prepare("SELECT 1 FROM notes WHERE uid=? AND kind='follow' AND who=? AND ts>?").bind(aid, user.name, Date.now() - 86400000).first();
+        if (!dup) {
+          const head = '👤 متابع جديد', text = user.name + ' بدأ يتابعك';
+          await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(aid, 'follow', 'p' + user.id, user.name, head, text, Date.now()).run();
+          try { await sendPush(env, head, text, '', 'u_' + aid); } catch (e) {}
+        }
+      }
+    }
     else await env.DB.prepare('DELETE FROM follows WHERE follower_id=? AND author_id=?').bind(user.id, aid).run();
     const n = (await env.DB.prepare('SELECT COUNT(*) AS n FROM follows WHERE author_id=?').bind(aid).first()).n;
     return json({ ok: true, followers: n, following: m === 'POST' });
