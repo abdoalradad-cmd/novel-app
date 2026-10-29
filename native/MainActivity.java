@@ -88,8 +88,11 @@ public class MainActivity extends BridgeActivity {
                     try {
                         wv.getSettings().setCacheMode(online ? WebSettings.LOAD_DEFAULT : WebSettings.LOAD_CACHE_ELSE_NETWORK);
                         String u = wv.getUrl();
-                        boolean onErrorPage = u == null || u.startsWith("https://localhost") || u.startsWith("http://localhost") || u.startsWith("about:") || u.startsWith("data:");
-                        if (reload && onErrorPage) wv.loadUrl(SITE_URL);
+                        boolean errPage = u != null && (u.startsWith("https://localhost") || u.startsWith("http://localhost") || u.startsWith("about:") || u.startsWith("data:"));
+                        // أونلاين: نعيد تحميل الموقع بس لو واقفين على صفحة الخطأ. أوفلاين: نحمّل النسخة المحفوظة.
+                        // (مفيش إعادة تحميل وقت فتح التطبيق والنت شغال، علشان متقاطعش التحميل الأول)
+                        boolean needLoad = online ? errPage : (u == null || errPage);
+                        if (reload && needLoad) wv.loadUrl(SITE_URL);
                     } catch (Throwable t) { }
                 }
             });
