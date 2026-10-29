@@ -42,6 +42,7 @@ jobs:
         run: |
           sed -i '0,/^dependencies {/s//dependencies {\n    implementation platform("com.google.firebase:firebase-bom:33.7.0")\n    implementation "com.google.firebase:firebase-messaging"/' android/app/build.gradle
           sed -i 's#<application#<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <application#' android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <application#' android/app/src/main/AndroidManifest.xml
           sed -i 's#</application>#    <meta-data android:name="com.google.firebase.messaging.default_notification_icon" android:resource="@drawable/ic_stat_radpad" />\n        <meta-data android:name="com.google.firebase.messaging.default_notification_color" android:resource="@android:color/holo_green_dark" />\n    </application>#' android/app/src/main/AndroidManifest.xml
           mkdir -p android/app/src/main/res/drawable
           cp native/ic_stat_radpad.xml android/app/src/main/res/drawable/
