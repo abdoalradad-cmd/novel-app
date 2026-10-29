@@ -6,6 +6,11 @@ import android.app.NotificationManager;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.webkit.WebSettings;
 import android.webkit.WebView;
 
 import androidx.core.app.ActivityCompat;
@@ -56,11 +61,60 @@ public class MainActivity extends BridgeActivity {
         } catch (Throwable t) { }
     }
 
+    // ===== العمل بدون نت =====
+    // لو مفيش نت: نخلّي المتصفح الداخلي يعرض آخر نسخة محفوظة من الموقع (من الكاش) بدل صفحة الخطأ.
+    private static final String SITE_URL = SITE_ORIGIN + "/novel_site/";
+
+    private boolean isOnline() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return true;
+            if (Build.VERSION.SDK_INT >= 23) {
+                Network n = cm.getActiveNetwork();
+                if (n == null) return false;
+                NetworkCapabilities c = cm.getNetworkCapabilities(n);
+                return c != null && c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+            }
+            return cm.getActiveNetworkInfo() != null && cm.getActiveNetworkInfo().isConnected();
+        } catch (Throwable t) { return true; }
+    }
+
+    private void applyCacheMode(final boolean reload) {
+        try {
+            final WebView wv = getBridge().getWebView();
+            final boolean online = isOnline();
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    try {
+                        wv.getSettings().setCacheMode(online ? WebSettings.LOAD_DEFAULT : WebSettings.LOAD_CACHE_ELSE_NETWORK);
+                        String u = wv.getUrl();
+                        boolean onErrorPage = u == null || u.startsWith("https://localhost") || u.startsWith("http://localhost") || u.startsWith("about:") || u.startsWith("data:");
+                        if (reload && onErrorPage) wv.loadUrl(SITE_URL);
+                    } catch (Throwable t) { }
+                }
+            });
+        } catch (Throwable t) { }
+    }
+
+    private void watchNetwork() {
+        try {
+            if (Build.VERSION.SDK_INT < 24) return;
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return;
+            cm.registerDefaultNetworkCallback(new ConnectivityManager.NetworkCallback() {
+                @Override public void onAvailable(Network network) { applyCacheMode(true); }
+                @Override public void onLost(Network network) { applyCacheMode(false); }
+            });
+        } catch (Throwable t) { }
+    }
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AppNativePlugin.class);
         super.onCreate(savedInstanceState);
         initPush();
+        applyCacheMode(true);
+        watchNetwork();
         try {
             WebView wv = getBridge().getWebView();
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
