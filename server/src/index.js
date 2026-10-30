@@ -95,7 +95,10 @@ async function ensureSchema(env) {
     'CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL, kind TEXT NOT NULL, novel_id INTEGER NOT NULL, title TEXT NOT NULL, ts INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)',
     'CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, kind TEXT NOT NULL, novel_ref TEXT NOT NULL, who TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, ts INTEGER NOT NULL)',
-    'CREATE INDEX IF NOT EXISTS idx_notes_uid ON notes(uid, ts)']) await env.DB.prepare(q).run();
+    'CREATE INDEX IF NOT EXISTS idx_notes_uid ON notes(uid, ts)',
+    'CREATE TABLE IF NOT EXISTS payments (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, plan_id TEXT NOT NULL, plan_name TEXT NOT NULL, months INTEGER NOT NULL, amount TEXT NOT NULL, method TEXT NOT NULL, sender TEXT NOT NULL, proof TEXT NOT NULL, note TEXT NOT NULL DEFAULT \'\', status TEXT NOT NULL DEFAULT \'pending\', reason TEXT NOT NULL DEFAULT \'\', created_at INTEGER NOT NULL, decided_at INTEGER NOT NULL DEFAULT 0)',
+    'CREATE INDEX IF NOT EXISTS idx_pay_user ON payments(user_id, created_at)',
+    'CREATE INDEX IF NOT EXISTS idx_pay_status ON payments(status, created_at)']) await env.DB.prepare(q).run();
   migrated = true;
 }
 
@@ -182,9 +185,28 @@ function liveNovelRow(r) {
 /* ---------- إعدادات Premium (واتساب + الأسعار) ---------- */
 async function getSetting(env, k) { const r = await env.DB.prepare('SELECT v FROM settings WHERE k=?').bind(k).first(); return r ? parseJson(r.v) : {}; }
 const setSetting = (env, k, v) => env.DB.prepare('INSERT INTO settings (k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v').bind(k, JSON.stringify(v)).run();
+const DEFAULT_PLANS = [{ id: 'm1', name: 'شهر', months: 1, price: '50', old: '', badge: '' }, { id: 'm6', name: '6 شهور', months: 6, price: '250', old: '300', badge: 'وفّر 17%' }, { id: 'y1', name: 'سنة', months: 12, price: '450', old: '600', badge: 'الأوفر' }];
+function cleanPlans(p) {
+  const arr = Array.isArray(p) && p.length ? p : DEFAULT_PLANS, out = [];
+  arr.slice(0, 6).forEach((x, i) => {
+    const months = parseInt(x && x.months, 10);
+    if (!(months >= 1 && months <= 120)) return;
+    out.push({ id: /^[a-z0-9_-]{1,12}$/i.test(String(x.id || '')) ? String(x.id) : 'p' + (i + 1), name: str(x.name, 30).trim() || months + ' شهر', months, price: str(x.price, 20).replace(/[^0-9.]/g, '').slice(0, 10), old: str(x.old, 20).replace(/[^0-9.]/g, '').slice(0, 10), badge: str(x.badge, 24).trim() });
+  });
+  return out.length ? out : DEFAULT_PLANS;
+}
+function cleanMethods(m, wa) {
+  m = m && typeof m === 'object' ? m : {};
+  const ip = m.instapay || {}, wl = m.wallet || {};
+  return {
+    instapay: { on: ip.on !== false, handle: str(ip.handle, 60).trim(), name: str(ip.name, 60).trim() },
+    wallet: { on: wl.on !== false, number: str(wl.number != null ? wl.number : (wa || '01067567795'), 25).replace(/[^0-9+]/g, ''), name: str(wl.name, 60).trim(), kinds: str(wl.kinds != null ? wl.kinds : 'فودافون كاش / اتصالات كاش / أورنج كاش', 80).trim() },
+  };
+}
 async function getPremiumInfo(env) {
   const x = await getSetting(env, 'premium');
-  return { whatsapp: x.whatsapp || '01067567795', defaultPrice: x.defaultPrice || '', message: x.message || '', prices: x.prices && typeof x.prices === 'object' ? x.prices : {} };
+  return { whatsapp: x.whatsapp || '01067567795', defaultPrice: x.defaultPrice || '', message: x.message || '', prices: x.prices && typeof x.prices === 'object' ? x.prices : {},
+    plans: cleanPlans(x.plans), methods: cleanMethods(x.methods, x.whatsapp) };
 }
 
 /* ---------- إشعارات الموبايل (Firebase Cloud Messaging) ---------- */
@@ -438,6 +460,37 @@ async function route(request, env) {
     return json({ keys: v.keys || {} }, 200, { 'Cache-Control': 'private, no-store' });
   }
 
+  /* ----- دفع اشتراك Premium (انستا باي / محفظة) ----- */
+  if (path === '/api/premium/pay' && m === 'POST') {
+    const b = await body(request, 6000), info = await getPremiumInfo(env);
+    const plan = info.plans.filter((p) => p.id === String(b.plan))[0];
+    if (!plan) return fail('اختار باقة صحيحة');
+    const method = b.method === 'instapay' ? 'instapay' : 'wallet';
+    if (!info.methods[method].on) return fail('طريقة الدفع دي مش متاحة دلوقتي');
+    const proof = cleanUrl(b.proof), sender = str(b.sender, 60).trim();
+    if (!proof) return fail('ارفع صورة إثبات التحويل');
+    if (sender.length < 3) return fail('اكتب رقم أو اسم حساب التحويل');
+    if (await tooMany(env, 'pay:' + user.id, 8, 86400000)) return fail('عملت طلبات كتير النهارده، كلّم الإدارة');
+    const pend = await env.DB.prepare("SELECT COUNT(*) AS n FROM payments WHERE user_id=? AND status='pending'").bind(user.id).first();
+    if (pend && pend.n >= 2) return fail('عندك طلبات لسه تحت المراجعة، استنى لحد ما تتراجع');
+    await noteAttempt(env, 'pay:' + user.id);
+    const amount = plan.price ? plan.price + ' جنيه' : '';
+    const r = await env.DB.prepare('INSERT INTO payments (user_id,plan_id,plan_name,months,amount,method,sender,proof,note,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').bind(user.id, plan.id, plan.name, plan.months, amount, method, sender, proof, str(b.note, 300).trim(), Date.now()).run();
+    try {
+      const { results: adms } = await env.DB.prepare("SELECT id FROM users WHERE role='admin'").all();
+      for (const a of adms) {
+        const text = user.name + ' طلب اشتراك Premium (' + plan.name + ')' + (amount ? ' — ' + amount : '') + ' عن طريق ' + (method === 'instapay' ? 'انستا باي' : 'المحفظة');
+        await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(a.id, 'payment', 'pay', user.name, '👑 طلب اشتراك جديد', text, Date.now()).run();
+        if (env.FCM_SA) { try { await sendPush(env, '👑 طلب اشتراك جديد', text, '', 'u_' + a.id); } catch (e) {} }
+      }
+    } catch (e) {}
+    return json({ ok: true, id: r.meta && r.meta.last_row_id });
+  }
+  if (path === '/api/premium/payments' && m === 'GET') {
+    const { results } = await env.DB.prepare('SELECT id,plan_name,months,amount,method,status,reason,created_at,decided_at FROM payments WHERE user_id=? ORDER BY created_at DESC LIMIT 20').bind(user.id).all();
+    return json({ payments: results.map((p) => ({ id: p.id, plan: p.plan_name, months: p.months, amount: p.amount, method: p.method, status: p.status, reason: p.reason, createdAt: p.created_at, decidedAt: p.decided_at })) }, 200, { 'Cache-Control': 'private, no-store' });
+  }
+
   /* ----- رواياتي ----- */
   if (path === '/api/my/novels' && m === 'GET') {
     const { results } = await env.DB.prepare('SELECT * FROM novels WHERE user_id=? ORDER BY updated_at DESC').bind(user.id).all();
@@ -556,10 +609,39 @@ async function route(request, env) {
       for (let i = 0; i < stmts.length; i += 40) await env.DB.batch(stmts.slice(i, i + 40));
       return json({ ok: true, users: b.users.length, novels: b.novels.length, chapters: b.chapters.length });
     }
+    if (path === '/api/admin/payments' && m === 'GET') {
+      const all = url.searchParams.get('status') === 'all';
+      const { results } = await env.DB.prepare('SELECT p.*,u.name AS uname,u.email AS uemail,u.premium_until AS upu FROM payments p JOIN users u ON u.id=p.user_id ' + (all ? '' : "WHERE p.status='pending' ") + 'ORDER BY p.created_at DESC LIMIT 100').all();
+      return json({ payments: results.map((p) => ({ id: p.id, user: p.uname, email: p.uemail, userId: p.user_id, plan: p.plan_name, months: p.months, amount: p.amount, method: p.method, sender: p.sender, proof: p.proof, note: p.note, status: p.status, reason: p.reason, createdAt: p.created_at, decidedAt: p.decided_at })) });
+    }
+    if ((g = /^\/api\/admin\/payments\/(\d+)\/(approve|reject)$/.exec(path)) && m === 'POST') {
+      const b = await body(request, 2000);
+      const p = await env.DB.prepare('SELECT * FROM payments WHERE id=?').bind(+g[1]).first();
+      if (!p) return fail('الطلب مش موجود', 404);
+      if (p.status !== 'pending') return fail('الطلب ده اتراجع قبل كده');
+      if (g[2] === 'approve') {
+        const u = await env.DB.prepare('SELECT id,premium_until FROM users WHERE id=?').bind(p.user_id).first();
+        if (!u) return fail('المستخدم مش موجود', 404);
+        const until = Math.max(Date.now(), u.premium_until || 0) + p.months * 30 * 86400000;
+        await env.DB.batch([
+          env.DB.prepare("UPDATE payments SET status='approved',decided_at=? WHERE id=? AND status='pending'").bind(Date.now(), p.id),
+          env.DB.prepare('UPDATE users SET premium_until=? WHERE id=?').bind(until, u.id)]);
+        const text = 'تم تفعيل اشتراك Premium (' + p.plan_name + ') على حسابك. استمتع بكل الروايات المقفولة 👑';
+        try { await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(u.id, 'payment', 'pay', 'RadPad', '👑 اشتراكك اتفعّل', text, Date.now()).run(); if (env.FCM_SA) await sendPush(env, '👑 اشتراكك اتفعّل', text, '', 'u_' + u.id); } catch (e) {}
+        return json({ ok: true, premiumUntil: until });
+      }
+      const reason = str(b.reason, 300).trim();
+      await env.DB.prepare("UPDATE payments SET status='rejected',reason=?,decided_at=? WHERE id=? AND status='pending'").bind(reason, Date.now(), p.id).run();
+      const text = 'طلب اشتراك Premium (' + p.plan_name + ') اترفض' + (reason ? ': ' + reason : '') + '. تقدر تبعت طلب جديد أو تكلّمنا.';
+      try { await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(p.user_id, 'payment', 'pay', 'RadPad', 'طلب الاشتراك اترفض', text, Date.now()).run(); if (env.FCM_SA) await sendPush(env, 'طلب الاشتراك اترفض', text, '', 'u_' + p.user_id); } catch (e) {}
+      return json({ ok: true });
+    }
     if (path === '/api/admin/premium' && m === 'PUT') {
       const b = await body(request, 200000), prices = {};
       Object.keys(b.prices || {}).slice(0, 1000).forEach((k) => { const v = str(b.prices[k], 60).trim(); if (v) prices[str(k, 60)] = v; });
-      await setSetting(env, 'premium', { whatsapp: str(b.whatsapp, 25).replace(/[^0-9+]/g, ''), defaultPrice: str(b.defaultPrice, 60).trim(), message: str(b.message, 300).trim(), prices });
+      const old0 = await getSetting(env, 'premium');
+      await setSetting(env, 'premium', { whatsapp: str(b.whatsapp, 25).replace(/[^0-9+]/g, ''), defaultPrice: str(b.defaultPrice, 60).trim(), message: str(b.message, 300).trim(), prices,
+        plans: b.plans ? cleanPlans(b.plans) : old0.plans, methods: b.methods ? cleanMethods(b.methods, b.whatsapp) : old0.methods });
       return json({ ok: true, info: await getPremiumInfo(env) });
     }
     if (path === '/api/admin/vault' && m === 'PUT') {
