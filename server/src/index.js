@@ -98,7 +98,11 @@ async function ensureSchema(env) {
     'CREATE INDEX IF NOT EXISTS idx_notes_uid ON notes(uid, ts)',
     'CREATE TABLE IF NOT EXISTS payments (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, plan_id TEXT NOT NULL, plan_name TEXT NOT NULL, months INTEGER NOT NULL, amount TEXT NOT NULL, method TEXT NOT NULL, sender TEXT NOT NULL, proof TEXT NOT NULL, note TEXT NOT NULL DEFAULT \'\', status TEXT NOT NULL DEFAULT \'pending\', reason TEXT NOT NULL DEFAULT \'\', created_at INTEGER NOT NULL, decided_at INTEGER NOT NULL DEFAULT 0)',
     'CREATE INDEX IF NOT EXISTS idx_pay_user ON payments(user_id, created_at)',
-    'CREATE INDEX IF NOT EXISTS idx_pay_status ON payments(status, created_at)']) await env.DB.prepare(q).run();
+    'CREATE INDEX IF NOT EXISTS idx_pay_status ON payments(status, created_at)',
+    "CREATE TABLE IF NOT EXISTS tts_ch (id INTEGER PRIMARY KEY AUTOINCREMENT, nid TEXT NOT NULL, idx INTEGER NOT NULL, ntitle TEXT NOT NULL DEFAULT '', ctitle TEXT NOT NULL DEFAULT '', ord INTEGER NOT NULL DEFAULT 0, sig TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, parts TEXT NOT NULL DEFAULT '[]', nparts INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, secs REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', owner TEXT NOT NULL DEFAULT '', lock_until INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, err TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL DEFAULT 0)",
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_tts_ch_key ON tts_ch(nid, idx)',
+    'CREATE INDEX IF NOT EXISTS idx_tts_ch_q ON tts_ch(status, ord)',
+    'CREATE TABLE IF NOT EXISTS tts_usage (day TEXT PRIMARY KEY, reqs INTEGER NOT NULL DEFAULT 0, hits INTEGER NOT NULL DEFAULT 0, chars INTEGER NOT NULL DEFAULT 0, secs REAL NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, fails INTEGER NOT NULL DEFAULT 0, limited INTEGER NOT NULL DEFAULT 0)']) await env.DB.prepare(q).run();
   migrated = true;
 }
 
@@ -209,6 +213,159 @@ async function getPremiumInfo(env) {
     plans: cleanPlans(x.plans), methods: cleanMethods(x.methods, x.whatsapp) };
 }
 
+
+/* ---------- الصوت المصري (Gemini TTS): طابور بأولويات + تخزين R2 + متابعة التكلفة ---------- */
+const TTS_DEFAULT = { model: 'gemini-3.8-flash-tts', legacyModel: 'gemini-2.5-flash-preview-tts', voice: 'Kore', style: 'warm, expressive audiobook narration in natural Egyptian Arabic', concurrency: 2, dailyMin: 20, freeMin: 0, priceIn: 0, priceOut: 0 };
+async function getTtsConf(env) {
+  const x = await getSetting(env, 'tts'), n = (v, d, lo, hi) => { const k = Number(v); return v !== '' && v != null && Number.isFinite(k) && k >= lo && k <= hi ? k : d; };
+  return { model: x.model || TTS_DEFAULT.model, legacyModel: x.legacyModel || TTS_DEFAULT.legacyModel, voice: x.voice || TTS_DEFAULT.voice, style: x.style || TTS_DEFAULT.style,
+    concurrency: n(x.concurrency, TTS_DEFAULT.concurrency, 1, 4), dailyMin: n(x.dailyMin, TTS_DEFAULT.dailyMin, 0, 100000), freeMin: n(x.freeMin, 0, 0, 100000), priceIn: n(x.priceIn, 0, 0, 1000), priceOut: n(x.priceOut, 0, 0, 1000) };
+}
+function ttsPrices(conf, now = Date.now()) { const late = now >= Date.UTC(2027, 0, 1); return { inP: conf.priceIn || (late ? 1 : 0.5), outP: conf.priceOut || (late ? 18 : 9) }; }
+function ttsCost(chars, secs, conf) { const p = ttsPrices(conf); return (Math.ceil(chars / 2.5) * p.inP + secs * 25 * p.outP) / 1e6; }
+const dayKey = (t = Date.now()) => new Date(t + 2 * 3600000).toISOString().slice(0, 10); // بتوقيت مصر تقريبًا
+function b64bytes(b64) { const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; }
+function pcmToWav(pcm, rate) {
+  const h = new ArrayBuffer(44), v = new DataView(h), w = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + pcm.length, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, pcm.length, true);
+  const out = new Uint8Array(44 + pcm.length); out.set(new Uint8Array(h), 0); out.set(pcm, 44); return out;
+}
+function findAudioB64(o, depth = 0) {
+  if (!o || depth > 8 || typeof o === 'string') return '';
+  if (Array.isArray(o)) { for (const x of o) { const r = findAudioB64(x, depth + 1); if (r) return r; } return ''; }
+  for (const k of Object.keys(o)) { const v = o[k]; if (k === 'data' && typeof v === 'string' && v.length > 400 && /^[A-Za-z0-9+/=\s]+$/.test(v.slice(0, 200))) return v; }
+  for (const k of Object.keys(o)) { const r = findAudioB64(o[k], depth + 1); if (r) return r; }
+  return '';
+}
+function toWav(b64) { const bytes = b64bytes(b64.replace(/\s+/g, '')); return String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) === 'RIFF' ? bytes : pcmToWav(bytes, 24000); }
+async function geminiSpeak(env, text, voiceName, conf) {
+  const key = env.GEMINI_API_KEY; if (!key) { const e = new Error('not_configured'); e.code = 503; throw e; }
+  let lastErr;
+  try {
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+      body: JSON.stringify({ model: conf.model, input: [{ type: 'user_input', content: [{ type: 'text', text, annotations: [{ type: 'speech_metadata', style: conf.style }] }] }], response_format: { type: 'audio' }, generation_config: { speech_config: [{ voice: voiceName }] } }) });
+    if (r.status === 429) { const e = new Error('busy'); e.code = 429; throw e; }
+    if (r.ok) { const j = await r.json(); const b = findAudioB64(j); if (b) return toWav(b); lastErr = new Error('no_audio'); } else lastErr = new Error('gemini_' + r.status);
+  } catch (e) { if (e.code === 429) throw e; lastErr = e; }
+  const r2 = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    body: JSON.stringify({ contents: [{ parts: [{ text: 'Read the following in a ' + conf.style + ': ' + text }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } } } }) });
+  if (r2.status === 429) { const e = new Error('busy'); e.code = 429; throw e; }
+  if (!r2.ok) { const e = new Error('gemini_' + r2.status); e.code = 502; e.detail = lastErr && lastErr.message; throw e; }
+  const b2 = findAudioB64(await r2.json()); if (!b2) { const e = new Error('no_audio'); e.code = 502; throw e; }
+  return toWav(b2);
+}
+const audioResp = (obj, hit) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'private, max-age=86400', 'X-Cache': hit ? 'HIT' : 'MISS' } });
+const CPS = 14; // حروف في الثانية تقريبًا (لتقدير المدة والتكلفة قبل التحويل)
+const hasLetters = (t) => /[؀-ۿA-Za-z0-9]/.test(t);
+// يقسّم نص الفصل لأجزاء (≤700 حرف) على حدود الفقرات/الجمل. بيرجّع [[بداية،نهاية]] بالنسبة للنص الأصلي
+function splitParts(text) {
+  const out = [], push = (a, b) => { if (b > a && hasLetters(text.slice(a, b))) out.push([a, b]); };
+  let a = -1, prevEnd = 0, pos = 0;
+  const flush = () => { if (a >= 0) push(a, prevEnd); a = -1; };
+  for (const line of text.split('\n')) {
+    const ls = pos, le = pos + line.length; pos = le + 1;
+    if (!line.trim()) continue;
+    if (line.length > 700) {
+      flush();
+      let cur = -1, curEnd = 0; const re = /[^.!؟?؛;:]+[.!؟?؛;:]*/g; let m;
+      while ((m = re.exec(line))) {
+        let ms = ls + m.index; const me = ms + m[0].length;
+        while (me - ms > 700) { let cut = line.lastIndexOf(' ', ms - ls + 700); cut = cut > ms - ls + 200 ? ls + cut : ms + 700; if (cur >= 0) { push(cur, curEnd); cur = -1; } push(ms, cut); ms = cut; }
+        if (cur >= 0 && me - cur > 700) { push(cur, curEnd); cur = -1; }
+        if (cur < 0) cur = ms; curEnd = me;
+      }
+      if (cur >= 0) push(cur, curEnd);
+      continue;
+    }
+    if (a >= 0 && le - a > 700) flush();
+    if (a < 0) a = ls;
+    prevEnd = le;
+  }
+  flush(); return out;
+}
+async function ttsBump(env, cols) {
+  const d = dayKey();
+  await env.DB.prepare('INSERT INTO tts_usage (day) VALUES (?) ON CONFLICT(day) DO NOTHING').bind(d).run();
+  const sets = Object.keys(cols).map((k) => k + '=' + k + '+?').join(',');
+  await env.DB.prepare('UPDATE tts_usage SET ' + sets + ' WHERE day=?').bind(...Object.values(cols), d).run();
+}
+async function ttsAlertAdmins(env, title, text) {
+  const st = await getSetting(env, 'tts_state'), now = Date.now();
+  if (st.alertAt && now - st.alertAt < 6 * 3600000) return;
+  await setSetting(env, 'tts_state', { ...st, alertAt: now });
+  try {
+    const { results } = await env.DB.prepare("SELECT id FROM users WHERE role='admin'").all();
+    for (const a of results) {
+      await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(a.id, 'payment', 'pay', 'RadPad', title, text, now).run();
+      if (env.FCM_SA) { try { await sendPush(env, title, text, '', 'u_' + a.id); } catch (e) {} }
+    }
+  } catch (e) {}
+}
+// خطوة تحويل واحدة: بتاخد أول فصل في الطابور (بالترتيب) وتولّد منه كام جزء، بشرط الحد اليومي. بتتنادى كل دقيقة من Cron.
+async function ttsStep(env, opts = {}) {
+  if (!env.GEMINI_API_KEY || !env.TTS_BUCKET) return { ok: false, idle: 'not_configured' };
+  const conf = await getTtsConf(env), now = Date.now(), st = await getSetting(env, 'tts_state');
+  if (st.pausedUntil && st.pausedUntil > now && !opts.force) return { ok: true, idle: 'paused' };
+  const u = await env.DB.prepare('SELECT secs FROM tts_usage WHERE day=?').bind(dayKey()).first();
+  let used = u ? u.secs : 0; const cap = conf.dailyMin * 60;
+  if (used >= cap) return { ok: true, idle: 'daily_limit' };
+  const tok = crypto.randomUUID();
+  const r = await env.DB.prepare("UPDATE tts_ch SET status='running',owner=?2,lock_until=?1+60000,attempts=attempts WHERE id=(SELECT id FROM tts_ch WHERE status IN ('queued','running') AND lock_until<=?1 AND retry_at<=?1 ORDER BY ord ASC,nid ASC,idx ASC LIMIT 1)").bind(now, tok).run();
+  if (r && r.meta && typeof r.meta.changes === 'number' && !r.meta.changes) return { ok: true, idle: 'empty' };
+  const ch = await env.DB.prepare("SELECT * FROM tts_ch WHERE owner=? AND status='running'").bind(tok).first();
+  if (!ch) return { ok: true, idle: 'empty' };
+  const parts = JSON.parse(ch.parts || '[]'); let done = ch.done, secsTot = ch.secs, made = 0, err = '', hardFail = false;
+  const t0 = Date.now();
+  while (done < parts.length && Date.now() - t0 < 22000 && made < 8 && used < cap) {
+    const idxs = []; for (let k = 0; k < conf.concurrency && done + k < parts.length && made + k < 8; k++) idxs.push(done + k);
+    const res = await Promise.allSettled(idxs.map(async (p) => {
+      const txt = ch.text.slice(parts[p][0], parts[p][1]).trim();
+      const wav = await geminiSpeak(env, txt, conf.voice, conf);
+      await env.TTS_BUCKET.put('c/' + ch.id + '/' + p + '.wav', wav, { httpMetadata: { contentType: 'audio/wav' } });
+      return { secs: Math.max(0, wav.length - 44) / 48000, chars: txt.length };
+    }));
+    let prefix = true, limited = false;
+    for (let k = 0; k < res.length; k++) {
+      const x = res[k];
+      if (x.status === 'fulfilled') {
+        used += x.value.secs; secsTot += prefix ? x.value.secs : 0; made++;
+        await ttsBump(env, { reqs: 1, chars: x.value.chars, secs: x.value.secs, cost: ttsCost(x.value.chars, x.value.secs, conf) });
+        if (prefix) done++;
+      } else {
+        prefix = false; const e = x.reason || {};
+        if (e.code === 429) limited = true; else { err = String(e.message || 'error').slice(0, 100); hardFail = true; }
+      }
+    }
+    if (limited) {
+      await setSetting(env, 'tts_state', { ...(await getSetting(env, 'tts_state')), pausedUntil: Date.now() + 30 * 60000, exhaustedAt: Date.now() });
+      await ttsBump(env, { limited: 1 });
+      await ttsAlertAdmins(env, '⚠️ تحويل الصوت وقف: الحصة المجانية خلصت أو الطلبات كتيرة', 'جوجل رفضت طلبات الصوت (429). التحويل واقف نص ساعة وهيكمّل لوحده. راجع حصتك في Google AI Studio أو فعّل الفوترة.');
+      err = 'limit'; break;
+    }
+    if (hardFail) { await ttsBump(env, { fails: 1 }); break; }
+  }
+  const complete = done >= parts.length, tries = ch.attempts + (hardFail ? 1 : 0);
+  const status = complete ? 'done' : (hardFail && tries >= 5 ? 'failed' : 'queued');
+  await env.DB.prepare("UPDATE tts_ch SET status=?,owner='',lock_until=0,done=?,secs=?,attempts=?,err=?,retry_at=?,updated=? WHERE id=?")
+    .bind(status, done, secsTot, hardFail ? tries : (made ? 0 : ch.attempts), complete ? '' : err, hardFail ? Date.now() + 60000 : 0, Date.now(), ch.id).run();
+  return { ok: true, id: ch.id, done, total: parts.length, status, made };
+}
+async function ttsStats(env) {
+  const conf = await getTtsConf(env), d = dayKey(), mo = d.slice(0, 7), st = await getSetting(env, 'tts_state'), pr = ttsPrices(conf);
+  const sum = async (where, ...a) => env.DB.prepare('SELECT COALESCE(SUM(reqs),0) AS reqs,COALESCE(SUM(chars),0) AS chars,COALESCE(SUM(secs),0) AS secs,COALESCE(SUM(cost),0) AS cost,COALESCE(SUM(fails),0) AS fails,COALESCE(SUM(limited),0) AS limited FROM tts_usage WHERE ' + where).bind(...a).first();
+  const today = await sum('day=?', d), month = await sum('day LIKE ?', mo + '%');
+  const q = await env.DB.prepare('SELECT status,COUNT(*) AS n FROM tts_ch GROUP BY status').all();
+  const chapters = { queued: 0, running: 0, done: 0, failed: 0 }; q.results.forEach((r) => (chapters[r.status] = r.n));
+  const { results: novels } = await env.DB.prepare("SELECT nid,MAX(ntitle) AS title,MIN(ord) AS ord,COUNT(*) AS n,SUM(status='done') AS d,SUM(LENGTH(text)) AS chars,SUM(CASE WHEN status='done' THEN 0 ELSE LENGTH(text)*(1.0-done*1.0/(CASE WHEN nparts<1 THEN 1 ELSE nparts END)) END) AS rem FROM tts_ch GROUP BY nid ORDER BY MIN(ord),nid LIMIT 80").all();
+  const remChars = Math.round(novels.reduce((a, r) => a + (r.rem || 0), 0)), remSecs = remChars / CPS;
+  const cap = conf.dailyMin * 60, freeSecs = conf.freeMin * 60, extraSecs = Math.max(0, today.secs - freeSecs);
+  return { conf, hasKey: !!env.GEMINI_API_KEY, hasBucket: !!env.TTS_BUCKET, chapters, novels: novels.map((r) => ({ nid: r.nid, title: r.title, ord: r.ord, n: r.n, d: r.d || 0, rem: Math.round(r.rem || 0) })),
+    today, month, prices: pr, pausedUntil: st.pausedUntil || 0, exhaustedAt: st.exhaustedAt || 0, dailyMin: conf.dailyMin, usedTodayPct: cap ? Math.min(999, Math.round(today.secs / cap * 100)) : 100,
+    freeMin: conf.freeMin, freeUsedPct: freeSecs ? Math.min(999, Math.round(today.secs / freeSecs * 100)) : null, extraCostToday: freeSecs ? (extraSecs * 25 * pr.outP) / 1e6 : null,
+    remain: { chars: remChars, mins: Math.round(remSecs / 60), cost: ttsCost(remChars, remSecs, conf), days: cap ? Math.ceil(remSecs / cap) : null } };
+}
+
 /* ---------- إشعارات الموبايل (Firebase Cloud Messaging) ---------- */
 async function fcmAccessToken(sa) {
   const now = Math.floor(Date.now() / 1000);
@@ -238,6 +395,10 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
     try { await ensureSchema(env); return await route(request, env); }
     catch (e) { return fail(e && e.message ? e.message : 'خطأ غير متوقع', e && e.status ? e.status : 400); }
+  },
+  // كل دقيقة: يكمّل تحويل الفصول في الطابور (بحد يومي)
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil((async () => { try { await ensureSchema(env); await ttsStep(env); } catch (e) {} })());
   }
 };
 
@@ -460,6 +621,22 @@ async function route(request, env) {
     return json({ keys: v.keys || {} }, 200, { 'Cache-Control': 'private, no-store' });
   }
 
+  /* ----- الصوت المصري (للمشتركين) ----- */
+  if (path === '/api/tts/chapter' && m === 'GET') {
+    if (!isPremium(user)) return fail('الاستماع لمشتركي Premium', 403);
+    const nid = str(url.searchParams.get('nid'), 80), ix = parseInt(url.searchParams.get('idx'), 10);
+    const c = await env.DB.prepare('SELECT id,status,parts,done,nparts,secs,LENGTH(text) AS total FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
+    if (!c) return json({ status: 'none' }, 200, { 'Cache-Control': 'no-store' });
+    if (c.status === 'done') return json({ status: 'ready', id: c.id, parts: JSON.parse(c.parts), total: c.total, secs: c.secs }, 200, { 'Cache-Control': 'private, max-age=300' });
+    return json({ status: 'pending', done: c.done, n: c.nparts }, 200, { 'Cache-Control': 'no-store' });
+  }
+  if ((g = /^\/api\/tts\/part\/(\d+)\/(\d+)$/.exec(path)) && m === 'GET') {
+    if (!isPremium(user)) return fail('الاستماع لمشتركي Premium', 403);
+    if (!env.TTS_BUCKET) return fail('التخزين مش متفعّل', 503);
+    const o = await env.TTS_BUCKET.get('c/' + g[1] + '/' + g[2] + '.wav'); if (!o) return fail('الجزء مش موجود', 404);
+    return audioResp(o, true);
+  }
+
   /* ----- دفع اشتراك Premium (انستا باي / محفظة) ----- */
   if (path === '/api/premium/pay' && m === 'POST') {
     const b = await body(request, 6000), info = await getPremiumInfo(env);
@@ -608,6 +785,63 @@ async function route(request, env) {
       }
       for (let i = 0; i < stmts.length; i += 40) await env.DB.batch(stmts.slice(i, i + 40));
       return json({ ok: true, users: b.users.length, novels: b.novels.length, chapters: b.chapters.length });
+    }
+    if (path === '/api/admin/tts' && m === 'GET') return json(await ttsStats(env));
+    if (path === '/api/admin/tts' && m === 'PUT') {
+      const b = await body(request, 3000), cur = await getTtsConf(env), nm = (v, d) => (/^[A-Za-z0-9._-]{2,60}$/.test(String(v || '')) ? String(v) : d), nu = (v, d, lo, hi) => { const k = Number(v); return v !== '' && v != null && Number.isFinite(k) && k >= lo && k <= hi ? k : d; };
+      await setSetting(env, 'tts', { model: nm(b.model, cur.model), legacyModel: nm(b.legacyModel, cur.legacyModel), voice: nm(b.voice, cur.voice), style: str(b.style, 200).trim() || cur.style,
+        concurrency: nu(b.concurrency, cur.concurrency, 1, 4), dailyMin: nu(b.dailyMin, cur.dailyMin, 0, 100000), freeMin: nu(b.freeMin, cur.freeMin, 0, 100000), priceIn: nu(b.priceIn, cur.priceIn, 0, 1000), priceOut: nu(b.priceOut, cur.priceOut, 0, 1000) });
+      return json({ ok: true, ...(await ttsStats(env)) });
+    }
+    if (path === '/api/admin/tts/known' && m === 'GET') {
+      const { results } = await env.DB.prepare('SELECT nid,idx,sig FROM tts_ch').all(), sigs = {};
+      results.forEach((r) => (sigs[r.nid + '#' + r.idx] = r.sig)); return json({ sigs });
+    }
+    if (path === '/api/admin/tts/enqueue' && m === 'POST') {
+      const b = await body(request, 700000); if (!Array.isArray(b.items) || b.items.length > 30) return fail('طلب غير صحيح');
+      const now = Date.now(); let added = 0, updated = 0, skipped = 0;
+      for (const it of b.items) {
+        const nid = str(it.nid, 80), ix = parseInt(it.idx, 10), text = String(it.text || '').slice(0, 150000).trim(), sig = str(it.sig, 40);
+        if (!nid || !(ix >= 0 && ix < 5000)) { skipped++; continue; }
+        const parts = splitParts(text); if (!parts.length) { skipped++; continue; }
+        const ntitle = str(it.ntitle, 120), ctitle = str(it.ctitle, 120), ord = Math.max(-1e9, Math.min(1e9, parseInt(it.ord, 10) || 0));
+        const ex = await env.DB.prepare('SELECT id,sig FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
+        if (!ex) { await env.DB.prepare('INSERT INTO tts_ch (nid,idx,ntitle,ctitle,ord,sig,text,parts,nparts,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?)').bind(nid, ix, ntitle, ctitle, ord, sig, text, JSON.stringify(parts), parts.length, now, now).run(); added++; }
+        else if (ex.sig === sig) { await env.DB.prepare('UPDATE tts_ch SET ntitle=?,ctitle=? WHERE id=?').bind(ntitle, ctitle, ex.id).run(); skipped++; }
+        else { await env.DB.prepare("UPDATE tts_ch SET ntitle=?,ctitle=?,sig=?,text=?,parts=?,nparts=?,done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=? WHERE id=?").bind(ntitle, ctitle, sig, text, JSON.stringify(parts), parts.length, now, ex.id).run(); updated++; }
+      }
+      return json({ ok: true, added, updated, skipped });
+    }
+    if (path === '/api/admin/tts/front' && m === 'POST') {
+      const b = await body(request, 500), nid = str(b.nid, 80);
+      const mn = await env.DB.prepare('SELECT COALESCE(MIN(ord),0) AS m FROM tts_ch').first();
+      await env.DB.prepare('UPDATE tts_ch SET ord=? WHERE nid=?').bind(mn.m - 1, nid).run(); return json({ ok: true, ...(await ttsStats(env)) });
+    }
+    if (path === '/api/admin/tts/remove' && m === 'POST') {
+      const b = await body(request, 500), nid = str(b.nid, 80);
+      const { results } = await env.DB.prepare('SELECT id,nparts FROM tts_ch WHERE nid=?').bind(nid).all();
+      if (env.TTS_BUCKET) for (const c of results) { const keys = []; for (let i = 0; i < c.nparts; i++) keys.push('c/' + c.id + '/' + i + '.wav'); for (let i = 0; i < keys.length; i += 100) await env.TTS_BUCKET.delete(keys.slice(i, i + 100)); }
+      await env.DB.prepare('DELETE FROM tts_ch WHERE nid=?').bind(nid).run(); return json({ ok: true, ...(await ttsStats(env)) });
+    }
+    if (path === '/api/admin/tts/retry' && m === 'POST') {
+      await env.DB.prepare("UPDATE tts_ch SET status='queued',attempts=0,retry_at=0,err='' WHERE status='failed'").run();
+      await setSetting(env, 'tts_state', { ...(await getSetting(env, 'tts_state')), pausedUntil: 0 }); return json({ ok: true, ...(await ttsStats(env)) });
+    }
+    if (path === '/api/admin/tts/run' && m === 'POST') { const r = await ttsStep(env, { force: true }); return json({ ok: true, step: r, ...(await ttsStats(env)) }); }
+    if (path === '/api/admin/tts/test' && m === 'POST') {
+      if (!env.GEMINI_API_KEY) return fail('مفتاح Gemini مش متحط على السيرفر', 503);
+      const b = await body(request, 2000), text = str(b.text, 400).trim(), conf = await getTtsConf(env), vn = /^[A-Za-z0-9_-]{2,40}$/.test(String(b.voiceName || '')) ? String(b.voiceName) : conf.voice;
+      if (text.length < 2) return fail('نص فاضي');
+      const wav = await geminiSpeak(env, text, vn, conf), secs = Math.max(0, wav.length - 44) / 48000;
+      await ttsBump(env, { reqs: 1, chars: text.length, secs, cost: ttsCost(text.length, secs, conf) });
+      return audioResp(wav, false);
+    }
+    if (path === '/api/admin/tts/voices' && m === 'GET') {
+      if (!env.GEMINI_API_KEY) return fail('مفتاح Gemini مش متحط على السيرفر', 503);
+      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/voices?pageSize=200', { headers: { 'x-goog-api-key': env.GEMINI_API_KEY } });
+      const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
+      const list = j && Array.isArray(j.voices) ? j.voices.map((v) => ({ name: v.name || v.voiceName || v.id, lang: v.languageCodes || v.language || v.locale || '', gender: v.gender || '' })) : [];
+      return json({ ok: r.ok, status: r.status, voices: list, raw: list.length ? undefined : t.slice(0, 600) });
     }
     if (path === '/api/admin/payments' && m === 'GET') {
       const all = url.searchParams.get('status') === 'all';
