@@ -58,6 +58,28 @@ jobs:
         working-directory: server
         run: npx --yes wrangler@4 d1 execute radpad-db --remote --file=schema.sql
 
+      - name: Prepare audio storage R2 (optional, for Egyptian voice)
+        working-directory: server
+        run: |
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID"
+          AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+          R=$(curl -s -H "$AUTH" "$API/r2/buckets/radpad-tts")
+          if ! echo "$R" | jq -e '.success' >/dev/null 2>&1; then
+            R=$(curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" --data '{"name":"radpad-tts"}' "$API/r2/buckets")
+          fi
+          if echo "$R" | jq -e '.success' >/dev/null 2>&1; then
+            printf '\n[[r2_buckets]]\nbinding = "TTS_BUCKET"\nbucket_name = "radpad-tts"\n' >> wrangler.toml
+            echo "R2 ready"
+          else
+            echo "::warning::R2 مش متفعّل (فعّله من Cloudflare ← R2 وأضف كارت). الصوت المصري مش هيشتغل لحد ما يتفعّل. رد Cloudflare:"
+            echo "$R" | jq -c '.errors' || true
+          fi
+
+      - name: Turn on automatic daily voice conversion (runs every minute)
+        working-directory: server
+        run: |
+          printf '\n[triggers]\ncrons = ["* * * * *"]\n' >> wrangler.toml
+
       - name: Deploy worker
         working-directory: server
         run: npx --yes wrangler@4 deploy
@@ -72,6 +94,18 @@ jobs:
             echo "Firebase key saved"
           else
             echo "No FCM_SERVICE_ACCOUNT secret: phone notifications stay off"
+          fi
+
+      - name: Save Gemini key for Egyptian voice (optional)
+        working-directory: server
+        env:
+          GK: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -n "$GK" ]; then
+            printf '%s' "$GK" | npx --yes wrangler@4 secret put GEMINI_API_KEY
+            echo "Gemini key saved"
+          else
+            echo "No GEMINI_API_KEY secret: Egyptian voice stays off"
           fi
 
       - name: Show server address
