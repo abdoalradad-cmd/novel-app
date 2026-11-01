@@ -108,6 +108,20 @@ jobs:
             echo "No GEMINI_API_KEY secret: Egyptian voice stays off"
           fi
 
+      - name: Save Azure Speech key + region (optional)
+        working-directory: server
+        env:
+          AK: ${{ secrets.AZURE_SPEECH_KEY }}
+          AR: ${{ secrets.AZURE_SPEECH_REGION }}
+        run: |
+          if [ -n "$AK" ]; then
+            printf '%s' "$AK" | npx --yes wrangler@4 secret put AZURE_SPEECH_KEY
+            if [ -n "$AR" ]; then printf '%s' "$AR" | npx --yes wrangler@4 secret put AZURE_SPEECH_REGION; fi
+            echo "Azure speech key saved"
+          else
+            echo "No AZURE_SPEECH_KEY secret: Azure voice stays off"
+          fi
+
       - name: Show server address
         run: |
           URL="https://radpad-api.$SUB.workers.dev"
