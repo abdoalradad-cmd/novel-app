@@ -108,6 +108,18 @@ jobs:
             echo "No GEMINI_API_KEY secret: Egyptian voice stays off"
           fi
 
+      - name: Save second Gemini key for Egyptian voice (optional)
+        working-directory: server
+        env:
+          GK2: ${{ secrets.GEMINI_API_KEY_2 }}
+        run: |
+          if [ -n "$GK2" ]; then
+            printf '%s' "$GK2" | npx --yes wrangler@4 secret put GEMINI_API_KEY_2
+            echo "Second Gemini key saved"
+          else
+            echo "No GEMINI_API_KEY_2 secret: Gemini 2 stays off"
+          fi
+
       - name: Save Azure Speech key + region (optional)
         working-directory: server
         env:
