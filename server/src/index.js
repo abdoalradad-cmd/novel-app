@@ -261,7 +261,13 @@ const AZ_VOICES = { narrator: { v: 'ar-SA-HamedNeural', rate: '-4%', pitch: '0%'
   boy: { v: 'ar-EG-ShakirNeural', rate: '+6%', pitch: '+38%' }, girl: { v: 'ar-EG-SalmaNeural', rate: '+6%', pitch: '+30%' } };
 const TTS_DEFAULT = { model: 'gemini-3.8-flash-tts', legacyModel: 'gemini-2.5-flash-preview-tts', style: 'warm, expressive audiobook narration in natural Egyptian Arabic', concurrency: 2, dailyMin: 20, freeMin: 0, priceIn: 0, priceOut: 0,
   gv: G_VOICES, defProv: 'gemini', novelProv: {}, multi: true, az: { region: '', dailyMin: 30, freeChars: 500000, price: 15, concurrency: 3, voices: AZ_VOICES } };
-const PROVS = ['gemini', 'azure'];
+const PROVS = ['gemini', 'gemini2', 'azure'];
+const normProv = (p) => (PROVS.includes(p) ? p : 'gemini');
+const isGem = (p) => p !== 'azure';
+// مفتاح جوجل لكل مزوّد (gemini2 = حساب جوجل تاني بمفتاح مختلف)
+const gemEnv = (env, prov) => (prov === 'gemini2' ? { ...env, GEMINI_API_KEY: env.GEMINI_API_KEY_2 } : env);
+const provCap = (conf, prov) => (prov === 'azure' ? conf.az.dailyMin : prov === 'gemini2' ? conf.g2.dailyMin : conf.dailyMin);
+const provPar = (conf, prov) => (prov === 'azure' ? conf.az.concurrency : prov === 'gemini2' ? conf.g2.concurrency : conf.concurrency);
 async function getTtsConf(env) {
   const x = await getSetting(env, 'tts'), n = (v, d, lo, hi) => { const k = Number(v); return v !== '' && v != null && Number.isFinite(k) && k >= lo && k <= hi ? k : d; };
   const gv = {}; ROLES.forEach((r) => { const v = x.gv && x.gv[r]; gv[r] = /^[A-Za-z0-9_-]{2,40}$/.test(String(v || '')) ? String(v) : G_VOICES[r]; });
@@ -271,10 +277,11 @@ async function getTtsConf(env) {
   return { model: x.model || TTS_DEFAULT.model, legacyModel: x.legacyModel || TTS_DEFAULT.legacyModel, style: x.style || TTS_DEFAULT.style, gv,
     concurrency: n(x.concurrency, TTS_DEFAULT.concurrency, 1, 4), dailyMin: n(x.dailyMin, TTS_DEFAULT.dailyMin, 0, 100000), freeMin: n(x.freeMin, 0, 0, 100000), priceIn: n(x.priceIn, 0, 0, 1000), priceOut: n(x.priceOut, 0, 0, 1000),
     defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false,
+    g2: { dailyMin: n((x.g2 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g2 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g2 || {}).concurrency, 2, 1, 4) },
     az: { region: /^[a-z0-9-]{3,30}$/.test(String(xa.region || '')) ? String(xa.region) : '', dailyMin: n(xa.dailyMin, 30, 0, 100000), freeChars: n(xa.freeChars, 500000, 0, 1e9), price: n(xa.price, 15, 0, 1000), concurrency: n(xa.concurrency, 3, 1, 8), voices } };
 }
 const azRegion = (env, conf) => conf.az.region || String(env.AZURE_SPEECH_REGION || '').trim().toLowerCase();
-const provReady = (env, conf, prov) => !!env.TTS_BUCKET && (prov === 'azure' ? !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)) : !!env.GEMINI_API_KEY);
+const provReady = (env, conf, prov) => !!env.TTS_BUCKET && (prov === 'azure' ? !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)) : prov === 'gemini2' ? !!env.GEMINI_API_KEY_2 : !!env.GEMINI_API_KEY);
 function ttsPrices(conf, now = Date.now()) { const late = now >= Date.UTC(2027, 0, 1); return { inP: conf.priceIn || (late ? 1 : 0.5), outP: conf.priceOut || (late ? 18 : 9) }; }
 function ttsCost(chars, secs, conf) { const p = ttsPrices(conf); return (Math.ceil(chars / 2.5) * p.inP + secs * 25 * p.outP) / 1e6; }
 const dayKey = (t = Date.now()) => new Date(t + 2 * 3600000).toISOString().slice(0, 10); // بتوقيت مصر تقريبًا
@@ -438,7 +445,7 @@ async function azurePart(env, text, conf) {
   const runs = conf.multi ? segmentRoles(text) : [{ role: 'narrator', text: stripMarks(text) }];
   const wav = await azureSpeakRuns(env, runs, conf); return { wav, chars: runs.reduce((a, r) => a + r.text.length, 0), calls: 1 };
 }
-const speakPart = (env, prov, text, conf) => (prov === 'azure' ? azurePart(env, text, conf) : geminiPart(env, text, conf));
+const speakPart = (env, prov, text, conf) => (prov === 'azure' ? azurePart(env, text, conf) : geminiPart(gemEnv(env, prov), text, conf));
 const audioResp = (obj, hit) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'private, max-age=86400', 'X-Cache': hit ? 'HIT' : 'MISS' } });
 const CPS = 14; // حروف في الثانية تقريبًا (لتقدير المدة والتكلفة قبل التحويل)
 const hasLetters = (t) => /[؀-ۿA-Za-z0-9]/.test(t);
@@ -474,8 +481,8 @@ async function ttsBump(env, prov, cols) {
   const sets = Object.keys(cols).map((k) => k + '=' + k + '+?').join(',');
   await env.DB.prepare('UPDATE tts_use SET ' + sets + ' WHERE day=? AND prov=?').bind(...Object.values(cols), d, prov).run();
 }
-const stKey = (prov) => (prov === 'azure' ? 'tts_state_az' : 'tts_state');
-const PNAME = { gemini: 'جوجل (Gemini)', azure: 'مايكروسوفت (Azure)' };
+const stKey = (prov) => (prov === 'azure' ? 'tts_state_az' : prov === 'gemini2' ? 'tts_state_g2' : 'tts_state');
+const PNAME = { gemini: 'جوجل (Gemini)', gemini2: 'جوجل (Gemini 2)', azure: 'مايكروسوفت (Azure)' };
 async function ttsAlertAdmins(env, title, text, prov = 'gemini') {
   const key = stKey(prov), st = await getSetting(env, key), now = Date.now();
   if (st.alertAt && now - st.alertAt < 6 * 3600000) return;
@@ -500,12 +507,12 @@ async function ttsWipeNovel(env, nid) { // مسح الصوت المتخزّن ل
 }
 // خطوة تحويل واحدة لمزوّد واحد: بتاخد أول فصل في طابوره (بالترتيب) وتولّد منه كام جزء، بشرط الحد اليومي. بتتنادى كل دقيقة من Cron.
 async function ttsStep(env, opts = {}) {
-  const prov = opts.prov === 'azure' ? 'azure' : 'gemini', conf = await getTtsConf(env);
+  const prov = normProv(opts.prov), conf = await getTtsConf(env);
   if (!provReady(env, conf, prov)) return { ok: false, idle: 'not_configured', prov };
   const now = Date.now(), key = stKey(prov), st = await getSetting(env, key);
   if (st.pausedUntil && st.pausedUntil > now && !opts.force) return { ok: true, idle: 'paused', prov };
   const u = await env.DB.prepare('SELECT secs FROM tts_use WHERE day=? AND prov=?').bind(dayKey(), prov).first();
-  let used = u ? u.secs : 0; const cap = (prov === 'azure' ? conf.az.dailyMin : conf.dailyMin) * 60, par = prov === 'azure' ? conf.az.concurrency : conf.concurrency;
+  let used = u ? u.secs : 0; const cap = provCap(conf, prov) * 60, par = provPar(conf, prov);
   if (used >= cap) return { ok: true, idle: 'daily_limit', prov };
   const tok = crypto.randomUUID();
   const r = await env.DB.prepare("UPDATE tts_ch SET status='running',owner=?2,lock_until=?1+60000,attempts=attempts WHERE id=(SELECT id FROM tts_ch WHERE prov=?3 AND status IN ('queued','running') AND lock_until<=?1 AND retry_at<=?1 ORDER BY ord ASC,nid ASC,idx ASC LIMIT 1)").bind(now, tok, prov).run();
@@ -553,7 +560,7 @@ async function ttsStats(env) {
   const sum = async (prov, where, ...a) => env.DB.prepare('SELECT COALESCE(SUM(reqs),0) AS reqs,COALESCE(SUM(chars),0) AS chars,COALESCE(SUM(secs),0) AS secs,COALESCE(SUM(cost),0) AS cost,COALESCE(SUM(fails),0) AS fails,COALESCE(SUM(limited),0) AS limited FROM tts_use WHERE prov=? AND ' + where).bind(prov, ...a).first();
   const { results: novels } = await env.DB.prepare("SELECT nid,MAX(ntitle) AS title,MIN(ord) AS ord,MAX(prov) AS prov,COUNT(*) AS n,SUM(status='done') AS d,SUM(LENGTH(text)) AS chars,SUM(CASE WHEN status='done' THEN 0 ELSE LENGTH(text)*(1.0-done*1.0/(CASE WHEN nparts<1 THEN 1 ELSE nparts END)) END) AS rem FROM tts_ch GROUP BY nid ORDER BY MIN(ord),nid LIMIT 120").all();
   const q = await env.DB.prepare('SELECT prov,status,COUNT(*) AS n FROM tts_ch GROUP BY prov,status').all();
-  const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { gemini: !!env.GEMINI_API_KEY, azure: !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)), azureKey: !!env.AZURE_SPEECH_KEY, azureRegion: azRegion(env, conf) }, prov: {}, prices: pr,
+  const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { gemini: !!env.GEMINI_API_KEY, gemini2: !!env.GEMINI_API_KEY_2, azure: !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)), azureKey: !!env.AZURE_SPEECH_KEY, azureRegion: azRegion(env, conf) }, prov: {}, prices: pr,
     chapters: { queued: 0, running: 0, done: 0, failed: 0 }, novels: novels.map((r) => ({ nid: r.nid, title: r.title, ord: r.ord, prov: r.prov, n: r.n, d: r.d || 0, rem: Math.round(r.rem || 0) })) };
   q.results.forEach((r) => (out.chapters[r.status] = (out.chapters[r.status] || 0) + r.n));
   out.hasKey = out.has.gemini;
@@ -561,14 +568,14 @@ async function ttsStats(env) {
     const st = await getSetting(env, stKey(prov)), today = await sum(prov, 'day=?', d), month = await sum(prov, 'day LIKE ?', mo + '%');
     const ch = { queued: 0, running: 0, done: 0, failed: 0 }; q.results.filter((r) => r.prov === prov).forEach((r) => (ch[r.status] = r.n));
     const remChars = Math.round(novels.filter((r) => r.prov === prov).reduce((a, r) => a + (r.rem || 0), 0)), remSecs = remChars / CPS;
-    const cap = (prov === 'azure' ? conf.az.dailyMin : conf.dailyMin) * 60;
+    const cap = provCap(conf, prov) * 60;
     const o = { today, month, chapters: ch, pausedUntil: st.pausedUntil || 0, exhaustedAt: st.exhaustedAt || 0, dailyMin: cap / 60, usedTodayPct: cap ? Math.min(999, Math.round(today.secs / cap * 100)) : 100 };
     if (prov === 'azure') {
       o.freeChars = conf.az.freeChars; o.monthPct = conf.az.freeChars ? Math.min(999, Math.round(month.chars / conf.az.freeChars * 100)) : null; o.extraCostMonth = Math.max(0, month.chars - conf.az.freeChars) * conf.az.price / 1e6;
       o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: remChars * conf.az.price / 1e6, days: cap ? Math.ceil(remSecs / cap) : null };
     } else {
-      const freeSecs = conf.freeMin * 60, extraSecs = Math.max(0, today.secs - freeSecs);
-      o.freeMin = conf.freeMin; o.freeUsedPct = freeSecs ? Math.min(999, Math.round(today.secs / freeSecs * 100)) : null; o.extraCostToday = freeSecs ? (extraSecs * 25 * pr.outP) / 1e6 : null;
+      const fm = prov === 'gemini2' ? conf.g2.freeMin : conf.freeMin, freeSecs = fm * 60, extraSecs = Math.max(0, today.secs - freeSecs);
+      o.freeMin = fm; o.freeUsedPct = freeSecs ? Math.min(999, Math.round(today.secs / freeSecs * 100)) : null; o.extraCostToday = freeSecs ? (extraSecs * 25 * pr.outP) / 1e6 : null;
       o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: ttsCost(remChars, remSecs, conf), days: cap ? Math.ceil(remSecs / cap) : null };
     }
     out.prov[prov] = o;
@@ -1051,7 +1058,8 @@ async function route(request, env) {
       ROLES.forEach((r) => { const v = (ba.voices || {})[r]; if (v && typeof v === 'object') { const o = { ...cur.az.voices[r] }; if (/^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]{2,40}$/.test(String(v.v || ''))) o.v = String(v.v); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.rate || ''))) o.rate = String(v.rate); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.pitch || ''))) o.pitch = String(v.pitch); az.voices[r] = o; } });
       await setSetting(env, 'tts', { model: nm(b.model, cur.model), legacyModel: nm(b.legacyModel, cur.legacyModel), style: str(b.style, 200).trim() || cur.style, gv,
         concurrency: nu(b.concurrency, cur.concurrency, 1, 4), dailyMin: nu(b.dailyMin, cur.dailyMin, 0, 100000), freeMin: nu(b.freeMin, cur.freeMin, 0, 100000), priceIn: nu(b.priceIn, cur.priceIn, 0, 1000), priceOut: nu(b.priceOut, cur.priceOut, 0, 1000),
-        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, multi: b.multi == null ? cur.multi : !!b.multi, az });
+        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, multi: b.multi == null ? cur.multi : !!b.multi, az,
+        g2: { dailyMin: nu((b.g2 || {}).dailyMin, cur.g2.dailyMin, 0, 100000), freeMin: nu((b.g2 || {}).freeMin, cur.g2.freeMin, 0, 100000), concurrency: nu((b.g2 || {}).concurrency, cur.g2.concurrency, 1, 4) } });
       return json({ ok: true, ...(await ttsStats(env)) });
     }
     if (path === '/api/admin/tts/known' && m === 'GET') {
@@ -1102,18 +1110,18 @@ async function route(request, env) {
       for (const p of (pv ? [pv] : PROVS)) await setSetting(env, stKey(p), { ...(await getSetting(env, stKey(p))), pausedUntil: 0 });
       return json({ ok: true, ...(await ttsStats(env)) });
     }
-    if (path === '/api/admin/tts/run' && m === 'POST') { const b = await body(request, 300).catch(() => ({})), r = await ttsStep(env, { force: true, prov: b.prov === 'azure' ? 'azure' : 'gemini' }); return json({ ok: true, step: r, ...(await ttsStats(env)) }); }
+    if (path === '/api/admin/tts/run' && m === 'POST') { const b = await body(request, 300).catch(() => ({})), r = await ttsStep(env, { force: true, prov: normProv(b.prov) }); return json({ ok: true, step: r, ...(await ttsStats(env)) }); }
     // تجربة الصوت بنص فيه راوي وراجل وست وطفل (بالمزوّد المطلوب)
     if (path === '/api/admin/tts/test' && m === 'POST') {
-      const b = await body(request, 3000), conf = await getTtsConf(env), prov = b.prov === 'azure' ? 'azure' : 'gemini';
-      if (!provReady({ ...env, TTS_BUCKET: env.TTS_BUCKET || {} }, conf, prov)) return fail(prov === 'azure' ? 'مفتاح Azure أو المنطقة (Region) ناقصين' : 'مفتاح Gemini مش متحط على السيرفر', 503);
+      const b = await body(request, 3000), conf = await getTtsConf(env), prov = normProv(b.prov);
+      if (!provReady({ ...env, TTS_BUCKET: env.TTS_BUCKET || {} }, conf, prov)) return fail(prov === 'azure' ? 'مفتاح Azure أو المنطقة (Region) ناقصين' : (prov === 'gemini2' ? 'مفتاح Gemini 2 مش متحط على السيرفر' : 'مفتاح Gemini مش متحط على السيرفر'), 503);
       const text = str(b.text, 600).trim() || 'دخل أحمد الغرفة وقال بصوت هادي: «صباح الخير يا سلمى». ابتسمت سلمى وردت: «صباح النور يا أستاذ أحمد». ثم جرى الصغير نحوهما وقال بفرحة: «بابا، بابا، شوف الرسمة!»';
       const o = await speakPart(env, prov, text, conf), secs = Math.max(0, o.wav.length - 44) / 48000;
       await ttsBump(env, prov, { reqs: o.calls || 1, chars: o.chars, secs, cost: prov === 'azure' ? o.chars * conf.az.price / 1e6 : ttsCost(o.chars, secs, conf) });
       return audioResp(o.wav, false);
     }
     if (path === '/api/admin/tts/voices' && m === 'GET') {
-      const prov = url.searchParams.get('prov') === 'azure' ? 'azure' : 'gemini', conf = await getTtsConf(env);
+      const prov = normProv(url.searchParams.get('prov')), conf = await getTtsConf(env), gkey = prov === 'gemini2' ? env.GEMINI_API_KEY_2 : env.GEMINI_API_KEY;
       if (prov === 'azure') {
         if (!env.AZURE_SPEECH_KEY || !azRegion(env, conf)) return fail('مفتاح Azure أو المنطقة (Region) ناقصين', 503);
         const r = await fetch('https://' + azRegion(env, conf) + '.tts.speech.microsoft.com/cognitiveservices/voices/list', { headers: { 'Ocp-Apim-Subscription-Key': env.AZURE_SPEECH_KEY } });
@@ -1121,8 +1129,8 @@ async function route(request, env) {
         const list = Array.isArray(j) ? j.filter((v) => /^ar-/.test(v.Locale || '')).map((v) => ({ name: v.ShortName, lang: v.Locale, gender: v.Gender })) : [];
         return json({ ok: r.ok, status: r.status, voices: list, raw: list.length ? undefined : t.slice(0, 400) });
       }
-      if (!env.GEMINI_API_KEY) return fail('مفتاح Gemini مش متحط على السيرفر', 503);
-      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/voices?pageSize=200', { headers: { 'x-goog-api-key': env.GEMINI_API_KEY } });
+      if (!gkey) return fail('مفتاح Gemini مش متحط على السيرفر', 503);
+      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/voices?pageSize=200', { headers: { 'x-goog-api-key': gkey } });
       const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
       const list = j && Array.isArray(j.voices) ? j.voices.map((v) => ({ name: v.name || v.voiceName || v.id, lang: v.languageCodes || v.language || v.locale || '', gender: v.gender || '' })) : [];
       return json({ ok: r.ok, status: r.status, voices: list, raw: list.length ? undefined : t.slice(0, 600) });
