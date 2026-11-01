@@ -10,6 +10,8 @@ import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 
@@ -19,6 +21,7 @@ import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.BridgeWebViewClient;
 
 import java.util.HashSet;
 import java.util.Set;
@@ -99,6 +102,41 @@ public class MainActivity extends BridgeActivity {
         } catch (Throwable t) { }
     }
 
+
+    // ===== منع ظهور شاشة "لا يوجد اتصال" =====
+    // لو تحميل الموقع فشل: نفتح النسخة المحفوظة (الكاش) فورًا. صفحة الخطأ تظهر بس لو مفيش أي نسخة محفوظة خالص.
+    private long lastCacheRetry = 0;
+
+    private void installOfflineFirstClient() {
+        try {
+            getBridge().setWebViewClient(new BridgeWebViewClient(getBridge()) {
+                @Override
+                public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                    try {
+                        if (request != null && request.isForMainFrame()) {
+                            long now = System.currentTimeMillis();
+                            if (now - lastCacheRetry > 15000) {
+                                lastCacheRetry = now;
+                                view.getSettings().setCacheMode(WebSettings.LOAD_CACHE_ELSE_NETWORK);
+                                view.loadUrl(SITE_URL);
+                                return;
+                            }
+                        }
+                    } catch (Throwable t) { }
+                    super.onReceivedError(view, request, error);
+                }
+
+                @Override
+                public void onPageFinished(WebView view, String url) {
+                    super.onPageFinished(view, url);
+                    try {
+                        if (url != null && url.startsWith(SITE_ORIGIN)) applyCacheMode(false);
+                    } catch (Throwable t) { }
+                }
+            });
+        } catch (Throwable t) { }
+    }
+
     private void watchNetwork() {
         try {
             if (Build.VERSION.SDK_INT < 24) return;
@@ -116,6 +154,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(AppNativePlugin.class);
         super.onCreate(savedInstanceState);
         initPush();
+        installOfflineFirstClient();
         applyCacheMode(true);
         watchNetwork();
         try {
