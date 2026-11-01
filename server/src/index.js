@@ -81,11 +81,11 @@ const userOut = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, 
 let migrated = false;
 async function ensureSchema(env) {
   if (migrated) return;
-  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio'], ['users', 'links'], ['novels', 'hidden']];
+  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio'], ['users', 'links'], ['novels', 'hidden'], ['users', 'payout']];
   for (const [t, c] of need) {
     try { await env.DB.prepare(`SELECT ${c} FROM ${t} LIMIT 1`).first(); }
     catch (e) {
-      const def = (c === 'locked' || c === 'premium_until' || c === 'hidden') ? 'INTEGER NOT NULL DEFAULT 0' : (c === 'avatar' || c === 'bio') ? "TEXT NOT NULL DEFAULT ''" : "TEXT NOT NULL DEFAULT '{}'";
+      const def = (c === 'locked' || c === 'premium_until' || c === 'hidden') ? 'INTEGER NOT NULL DEFAULT 0' : (c === 'avatar' || c === 'bio' || c === 'payout') ? "TEXT NOT NULL DEFAULT ''" : "TEXT NOT NULL DEFAULT '{}'";
       await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`).run();
     }
   }
@@ -102,6 +102,10 @@ async function ensureSchema(env) {
     "CREATE TABLE IF NOT EXISTS tts_ch (id INTEGER PRIMARY KEY AUTOINCREMENT, nid TEXT NOT NULL, idx INTEGER NOT NULL, ntitle TEXT NOT NULL DEFAULT '', ctitle TEXT NOT NULL DEFAULT '', ord INTEGER NOT NULL DEFAULT 0, sig TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, parts TEXT NOT NULL DEFAULT '[]', nparts INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, secs REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', owner TEXT NOT NULL DEFAULT '', lock_until INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, err TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL DEFAULT 0)",
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_tts_ch_key ON tts_ch(nid, idx)',
     'CREATE INDEX IF NOT EXISTS idx_tts_ch_q ON tts_ch(status, ord)',
+    'CREATE TABLE IF NOT EXISTS purchases (user_id INTEGER NOT NULL, nid TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (user_id, nid))',
+    "CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, nid TEXT NOT NULL, ntitle TEXT NOT NULL DEFAULT '', author_id INTEGER NOT NULL DEFAULT 0, price REAL NOT NULL DEFAULT 0, share REAL NOT NULL DEFAULT 0, method TEXT NOT NULL DEFAULT '', sender TEXT NOT NULL DEFAULT '', proof TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', reason TEXT NOT NULL DEFAULT '', paid_out INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, decided_at INTEGER NOT NULL DEFAULT 0)",
+    'CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, created_at)',
+    'CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, created_at)',
     'CREATE TABLE IF NOT EXISTS tts_usage (day TEXT PRIMARY KEY, reqs INTEGER NOT NULL DEFAULT 0, hits INTEGER NOT NULL DEFAULT 0, chars INTEGER NOT NULL DEFAULT 0, secs REAL NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, fails INTEGER NOT NULL DEFAULT 0, limited INTEGER NOT NULL DEFAULT 0)']) await env.DB.prepare(q).run();
   migrated = true;
 }
@@ -115,7 +119,14 @@ async function makeUnlock(env, nid) {
 async function hasUnlock(env, request, nid) {
   const t = request.headers.get('X-Unlock');
   if (t) { const p = await readToken(env, t); if (p && p.n === nid) return true; }
-  if (request.headers.get('Authorization')) { const u = await authUser(env, request); if (isPremium(u)) return true; }
+  if (request.headers.get('Authorization')) {
+    const u = await authUser(env, request);
+    if (u) {
+      if (u.role === 'admin') return true;
+      if (await env.DB.prepare('SELECT 1 AS x FROM novels WHERE id=? AND user_id=?').bind(nid, u.id).first()) return true;
+      if (await env.DB.prepare('SELECT 1 AS x FROM purchases WHERE user_id=? AND nid=?').bind(u.id, 'u' + nid).first()) return true;
+    }
+  }
   return false;
 }
 
@@ -152,6 +163,7 @@ function cleanNovel(b) {
   const extra = { subtitle: str(b.subtitle, LIM.subtitle).trim(), novelStatus: b.novelStatus === 'مكتملة' ? 'مكتملة' : 'مستمرة',
     promoUrl: cleanUrl(b.promoUrl), pdfUrl: cleanUrl(b.pdfUrl), grad: GRADS.includes(b.grad) ? b.grad : GRADS[0],
     icon: ICONS.includes(b.icon) ? b.icon : 'fa-book', allowSharing: b.allowSharing !== false, password, lockAll, lockPdf: b.lockPdf !== false };
+  extra.price = (lockAll || anyLocked || extra.pdfUrl) ? cleanPrice(b.price) : 0; extra.oldPrice = extra.price && cleanPrice(b.oldPrice) > extra.price ? cleanPrice(b.oldPrice) : 0;
   return { title, author: str(b.author, LIM.author).trim(), genre: str(b.genre, LIM.genre).trim() || 'عام',
     tags, synopsis: str(b.synopsis, LIM.synopsis), cover: cleanUrl(b.cover), extra: JSON.stringify(extra), chapters: chs };
 }
@@ -172,10 +184,11 @@ function chapterStmts(env, id, ver, chs) {
   const ins = chs.map((c, i) => env.DB.prepare('INSERT INTO chapters (novel_id,ver,idx,title,content,locked) VALUES (?,?,?,?,?,?)').bind(id, ver, i, c.title, c.content, c.locked ? 1 : 0));
   return [del, ...ins];
 }
+const cleanPrice = (v) => { const n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.]/g, '')); return n > 0 && n <= 100000 ? Math.round(n * 100) / 100 : 0; };
 function extraOf(raw) {
   const x = parseJson(raw);
   return { subtitle: x.subtitle || '', novelStatus: x.novelStatus || 'مستمرة', promoUrl: x.promoUrl || '', pdfUrl: x.pdfUrl || '', grad: GRADS.includes(x.grad) ? x.grad : GRADS[0],
-    icon: ICONS.includes(x.icon) ? x.icon : 'fa-book', allowSharing: x.allowSharing !== false, password: x.password || '', lockAll: !!x.lockAll, lockPdf: x.lockPdf !== false };
+    icon: ICONS.includes(x.icon) ? x.icon : 'fa-book', allowSharing: x.allowSharing !== false, password: x.password || '', lockAll: !!x.lockAll, lockPdf: x.lockPdf !== false, price: cleanPrice(x.price), oldPrice: cleanPrice(x.oldPrice) };
 }
 function myNovelRow(r) {
   return { id: r.id, status: r.status, isLive: !!r.is_live, hidden: !!r.hidden, rejectReason: r.reject_reason, updatedAt: r.updated_at, publishedAt: r.published_at,
@@ -210,9 +223,34 @@ function cleanMethods(m, wa) {
 async function getPremiumInfo(env) {
   const x = await getSetting(env, 'premium');
   return { whatsapp: x.whatsapp || '01067567795', defaultPrice: x.defaultPrice || '', message: x.message || '', prices: x.prices && typeof x.prices === 'object' ? x.prices : {},
-    plans: cleanPlans(x.plans), methods: cleanMethods(x.methods, x.whatsapp) };
+    plans: cleanPlans(x.plans), methods: cleanMethods(x.methods, x.whatsapp), features: cleanFeatures(x.features), novelPrices: cleanNovelPrices((await getSetting(env, 'nprices')).prices) };
+}
+const DEFAULT_FEATURES = ['تسمع الروايات بصوت مصري وانت بتقرا 🎧', 'شغّال على كل أجهزتك بنفس الحساب', 'بتدعم الكتّاب اللي بتحبهم'];
+function cleanFeatures(f) {
+  const out = (Array.isArray(f) ? f : []).map((t) => str(t, 120).trim()).filter(Boolean).slice(0, 10);
+  return out.length ? out : DEFAULT_FEATURES;
+}
+function cleanNovelPrices(p) {
+  const out = {}; if (!p || typeof p !== 'object') return out;
+  Object.keys(p).slice(0, 600).forEach((k) => { const v = p[k] || {}, pr = cleanPrice(v.price); if (pr) { const old = cleanPrice(v.old); out[str(k, 80)] = { price: pr, old: old > pr ? old : 0, title: str(v.title, 120).trim() }; } });
+  return out;
 }
 
+
+const COMMISSION = 0.25; // نسبة الموقع من كل رواية بتتباع
+const payoutOf = (raw) => { const o = parseJson(raw); return o.value ? { kind: o.kind === 'instapay' ? 'instapay' : 'wallet', value: String(o.value), name: String(o.name || '') } : null; };
+async function notifyUser(env, uid, title, text, ref = 'ord') {
+  try { await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(uid, 'payment', ref, 'RadPad', title, text, Date.now()).run(); if (env.FCM_SA) await sendPush(env, title, text, '', 'u_' + uid); } catch (e) {}
+}
+async function notifyAdmins(env, who, title, text) {
+  try {
+    const { results } = await env.DB.prepare("SELECT id FROM users WHERE role='admin'").all();
+    for (const a of results) {
+      await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(a.id, 'payment', 'ordadm', who, title, text, Date.now()).run();
+      if (env.FCM_SA) { try { await sendPush(env, title, text, '', 'u_' + a.id); } catch (e) {} }
+    }
+  } catch (e) {}
+}
 
 /* ---------- الصوت المصري (Gemini TTS): طابور بأولويات + تخزين R2 + متابعة التكلفة ---------- */
 const TTS_DEFAULT = { model: 'gemini-3.8-flash-tts', legacyModel: 'gemini-2.5-flash-preview-tts', voice: 'Kore', style: 'warm, expressive audiobook narration in natural Egyptian Arabic', concurrency: 2, dailyMin: 20, freeMin: 0, priceIn: 0, priceOut: 0 };
@@ -451,7 +489,7 @@ async function route(request, env) {
     return json({ novels: results.map((r) => {
       const x = extraOf(r.l_extra);
       return { id: r.id, title: r.l_title, subtitle: x.subtitle, author: r.l_author || r.owner, genre: r.l_genre, tags: parseTags(r.l_tags),
-        synopsis: r.l_synopsis, cover: r.l_cover, novelStatus: x.novelStatus, promoUrl: x.promoUrl, pdfUrl: x.pdfUrl, grad: x.grad, icon: x.icon, allowSharing: x.allowSharing, locked: !!(x.lockAll && x.password), pdfLocked: !!(x.password && x.lockPdf && (x.lockAll || chapLocked[r.id])),
+        synopsis: r.l_synopsis, cover: r.l_cover, novelStatus: x.novelStatus, promoUrl: x.promoUrl, pdfUrl: x.pdfUrl, grad: x.grad, icon: x.icon, allowSharing: x.allowSharing, price: x.price, oldPrice: x.oldPrice, locked: !!(x.lockAll && x.password), pdfLocked: !!(x.password && x.lockPdf && (x.lockAll || chapLocked[r.id])),
         publishedAt: r.published_at, owner: r.owner, uid: r.user_id, chapters: byNovel[r.id] || [] };
     }) }, 200, { 'Cache-Control': 'public, max-age=60' });
   }
@@ -616,9 +654,11 @@ async function route(request, env) {
     return json({ ok: true, hidden: !!b.hidden });
   }
   if (path === '/api/premium/keys' && m === 'GET') {
-    if (!isPremium(user)) return fail('للمشتركين فقط', 403);
-    const v = await getSetting(env, 'vault');
-    return json({ keys: v.keys || {} }, 200, { 'Cache-Control': 'private, no-store' });
+    const v = await getSetting(env, 'vault'), all = v.keys || {};
+    if (user.role === 'admin') return json({ keys: all }, 200, { 'Cache-Control': 'private, no-store' });
+    const { results } = await env.DB.prepare('SELECT nid FROM purchases WHERE user_id=?').bind(user.id).all(), out = {};
+    results.forEach((r) => { if (all[r.nid]) out[r.nid] = all[r.nid]; });
+    return json({ keys: out }, 200, { 'Cache-Control': 'private, no-store' });
   }
 
   /* ----- الصوت المصري (للمشتركين) ----- */
@@ -635,6 +675,51 @@ async function route(request, env) {
     if (!env.TTS_BUCKET) return fail('التخزين مش متفعّل', 503);
     const o = await env.TTS_BUCKET.get('c/' + g[1] + '/' + g[2] + '.wav'); if (!o) return fail('الجزء مش موجود', 404);
     return audioResp(o, true);
+  }
+
+  /* ----- شراء روايات (انستا باي / محفظة) ----- */
+  if (path === '/api/me/library' && m === 'GET') {
+    const p = await env.DB.prepare('SELECT nid FROM purchases WHERE user_id=?').bind(user.id).all();
+    const o = await env.DB.prepare('SELECT id,nid,ntitle,price,method,status,reason,created_at,decided_at FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT 30').bind(user.id).all();
+    return json({ purchases: p.results.map((r) => r.nid), orders: o.results.map((r) => ({ id: r.id, nid: r.nid, title: r.ntitle, price: r.price, method: r.method, status: r.status, reason: r.reason, createdAt: r.created_at, decidedAt: r.decided_at })) }, 200, { 'Cache-Control': 'private, no-store' });
+  }
+  if (path === '/api/orders' && m === 'POST') {
+    const b = await body(request, 6000), nid = str(b.nid, 80).trim(), info = await getPremiumInfo(env);
+    if (!nid) return fail('اختار رواية');
+    let title = '', price = 0, authorId = 0, g2;
+    if ((g2 = /^u(\d+)$/.exec(nid))) {
+      const n = await env.DB.prepare('SELECT user_id,l_title,l_extra FROM novels WHERE id=? AND is_live=1 AND hidden=0').bind(+g2[1]).first();
+      if (!n) return fail('الرواية مش موجودة', 404);
+      const x = extraOf(n.l_extra); if (!x.price || !x.password) return fail('الرواية دي مش معروضة للشراء');
+      if (n.user_id === user.id) return fail('دي روايتك 😄');
+      title = n.l_title; price = x.price; authorId = n.user_id;
+    } else {
+      const np = info.novelPrices[nid]; if (!np) return fail('الرواية دي مش معروضة للشراء');
+      title = np.title || str(b.title, 120).trim(); price = np.price;
+    }
+    if (user.role === 'admin') return fail('إنت الأدمن، كل الروايات مفتوحة ليك');
+    const method = b.method === 'instapay' ? 'instapay' : 'wallet';
+    if (!info.methods[method].on) return fail('طريقة الدفع دي مش متاحة دلوقتي');
+    const proof = cleanUrl(b.proof), sender = str(b.sender, 60).trim();
+    if (!proof) return fail('ارفع صورة إثبات التحويل');
+    if (sender.length < 3) return fail('اكتب رقم أو اسم حساب التحويل');
+    if (await env.DB.prepare('SELECT 1 AS x FROM purchases WHERE user_id=? AND nid=?').bind(user.id, nid).first()) return fail('إنت مشتري الرواية دي قبل كده ✅');
+    if (await tooMany(env, 'ord:' + user.id, 12, 86400000)) return fail('عملت طلبات كتير النهارده، كلّم الإدارة');
+    if (await env.DB.prepare("SELECT 1 AS x FROM orders WHERE user_id=? AND nid=? AND status='pending'").bind(user.id, nid).first()) return fail('عندك طلب لنفس الرواية لسه تحت المراجعة');
+    await noteAttempt(env, 'ord:' + user.id);
+    const share = authorId ? Math.round(price * (1 - COMMISSION) * 100) / 100 : 0;
+    const r = await env.DB.prepare('INSERT INTO orders (user_id,nid,ntitle,author_id,price,share,method,sender,proof,note,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)').bind(user.id, nid, title, authorId, price, share, method, sender, proof, str(b.note, 300).trim(), Date.now()).run();
+    await notifyAdmins(env, user.name, '🛒 طلب شراء رواية', user.name + ' عايز يشتري «' + title + '» بـ ' + price + ' جنيه عن طريق ' + (method === 'instapay' ? 'انستا باي' : 'المحفظة'));
+    return json({ ok: true, id: r.meta && r.meta.last_row_id });
+  }
+  if (path === '/api/me/payout' && m === 'GET') { const r = await env.DB.prepare('SELECT payout FROM users WHERE id=?').bind(user.id).first(); return json({ payout: payoutOf(r && r.payout) }, 200, { 'Cache-Control': 'private, no-store' }); }
+  if (path === '/api/me/payout' && m === 'PUT') {
+    const b = await body(request, 1000), kind = b.kind === 'instapay' ? 'instapay' : 'wallet', value = str(b.value, 60).trim().replace(/[<>"']/g, ''), name = str(b.name, 60).trim().replace(/[<>"']/g, '');
+    await env.DB.prepare('UPDATE users SET payout=? WHERE id=?').bind(value ? JSON.stringify({ kind, value, name }) : '', user.id).run(); return json({ ok: true, payout: payoutOf(JSON.stringify({ kind, value, name })) });
+  }
+  if (path === '/api/my/earnings' && m === 'GET') {
+    const r = await env.DB.prepare("SELECT COUNT(*) AS n,COALESCE(SUM(share),0) AS total,COALESCE(SUM(CASE WHEN paid_out=0 THEN share ELSE 0 END),0) AS due FROM orders WHERE author_id=? AND status='approved'").bind(user.id).first();
+    return json({ sales: r.n, total: r.total, due: r.due, paid: r.total - r.due, commission: COMMISSION * 100 }, 200, { 'Cache-Control': 'private, no-store' });
   }
 
   /* ----- دفع اشتراك Premium (انستا باي / محفظة) ----- */
@@ -843,6 +928,43 @@ async function route(request, env) {
       const list = j && Array.isArray(j.voices) ? j.voices.map((v) => ({ name: v.name || v.voiceName || v.id, lang: v.languageCodes || v.language || v.locale || '', gender: v.gender || '' })) : [];
       return json({ ok: r.ok, status: r.status, voices: list, raw: list.length ? undefined : t.slice(0, 600) });
     }
+    if (path === '/api/admin/nprices' && m === 'PUT') {
+      const b = await body(request, 300000); await setSetting(env, 'nprices', { prices: cleanNovelPrices(b.prices) });
+      return json({ ok: true, info: await getPremiumInfo(env) });
+    }
+    if (path === '/api/admin/orders' && m === 'GET') {
+      const all = url.searchParams.get('status') === 'all';
+      const { results } = await env.DB.prepare('SELECT o.*,u.name AS uname,u.email AS uemail,a.name AS aname,a.payout AS apayout FROM orders o JOIN users u ON u.id=o.user_id LEFT JOIN users a ON a.id=o.author_id ' + (all ? '' : "WHERE o.status='pending' ") + 'ORDER BY o.created_at DESC LIMIT 100').all();
+      return json({ orders: results.map((o) => ({ id: o.id, user: o.uname, email: o.uemail, userId: o.user_id, nid: o.nid, title: o.ntitle, price: o.price, share: o.share, authorId: o.author_id, author: o.aname || '', payout: o.author_id ? payoutOf(o.apayout) : null, method: o.method, sender: o.sender, proof: o.proof, note: o.note, status: o.status, reason: o.reason, paidOut: !!o.paid_out, createdAt: o.created_at, decidedAt: o.decided_at })) });
+    }
+    if ((g = /^\/api\/admin\/orders\/(\d+)\/(approve|reject)$/.exec(path)) && m === 'POST') {
+      const b = await body(request, 2000), o = await env.DB.prepare('SELECT * FROM orders WHERE id=?').bind(+g[1]).first();
+      if (!o) return fail('الطلب مش موجود', 404);
+      if (o.status !== 'pending') return fail('الطلب ده اتراجع قبل كده');
+      if (g[2] === 'approve') {
+        await env.DB.batch([env.DB.prepare("UPDATE orders SET status='approved',decided_at=? WHERE id=? AND status='pending'").bind(Date.now(), o.id),
+          env.DB.prepare('INSERT OR IGNORE INTO purchases (user_id,nid,ts) VALUES (?,?,?)').bind(o.user_id, o.nid, Date.now())]);
+        await notifyUser(env, o.user_id, '✅ الرواية اتفتحت ليك', 'تم تأكيد شرائك لرواية «' + o.ntitle + '». تقدر تقراها وتحمّل الـ PDF بتاعها دلوقتي.');
+        if (o.author_id) await notifyUser(env, o.author_id, '💰 اتباعت نسخة من روايتك', 'اتباعت نسخة من «' + o.ntitle + '». نصيبك ' + o.share + ' جنيه (بعد نسبة الموقع ' + (COMMISSION * 100) + '%).', 'ord');
+        return json({ ok: true });
+      }
+      const reason = str(b.reason, 300).trim();
+      await env.DB.prepare("UPDATE orders SET status='rejected',reason=?,decided_at=? WHERE id=? AND status='pending'").bind(reason, Date.now(), o.id).run();
+      await notifyUser(env, o.user_id, 'طلب شراء الرواية اترفض', 'طلب شراء «' + o.ntitle + '» اترفض' + (reason ? ': ' + reason : '') + '. تقدر تبعت طلب جديد أو تكلّمنا.');
+      return json({ ok: true });
+    }
+    if (path === '/api/admin/dues' && m === 'GET') {
+      const { results } = await env.DB.prepare("SELECT o.author_id,u.name,u.payout,COUNT(*) AS n,SUM(o.share) AS due FROM orders o JOIN users u ON u.id=o.author_id WHERE o.status='approved' AND o.paid_out=0 AND o.author_id>0 GROUP BY o.author_id ORDER BY due DESC").all();
+      const tot = await env.DB.prepare("SELECT COALESCE(SUM(price),0) AS gross,COALESCE(SUM(price-share),0) AS site,COUNT(*) AS n FROM orders WHERE status='approved'").first();
+      return json({ dues: results.map((r) => ({ authorId: r.author_id, name: r.name, sales: r.n, due: Math.round(r.due * 100) / 100, payout: payoutOf(r.payout) })), totals: { gross: tot.gross, site: tot.site, sales: tot.n } });
+    }
+    if ((g = /^\/api\/admin\/dues\/(\d+)\/settle$/.exec(path)) && m === 'POST') {
+      const r = await env.DB.prepare("SELECT COALESCE(SUM(share),0) AS due FROM orders WHERE author_id=? AND status='approved' AND paid_out=0").bind(+g[1]).first();
+      if (!r.due) return fail('مفيش مستحقات للكاتب ده');
+      await env.DB.prepare("UPDATE orders SET paid_out=1 WHERE author_id=? AND status='approved' AND paid_out=0").bind(+g[1]).run();
+      await notifyUser(env, +g[1], '💸 اتحوّلك مستحقاتك', 'تم تحويل ' + (Math.round(r.due * 100) / 100) + ' جنيه من مبيعات رواياتك على حساب التحويل بتاعك.');
+      return json({ ok: true, amount: r.due });
+    }
     if (path === '/api/admin/payments' && m === 'GET') {
       const all = url.searchParams.get('status') === 'all';
       const { results } = await env.DB.prepare('SELECT p.*,u.name AS uname,u.email AS uemail,u.premium_until AS upu FROM payments p JOIN users u ON u.id=p.user_id ' + (all ? '' : "WHERE p.status='pending' ") + 'ORDER BY p.created_at DESC LIMIT 100').all();
@@ -860,7 +982,7 @@ async function route(request, env) {
         await env.DB.batch([
           env.DB.prepare("UPDATE payments SET status='approved',decided_at=? WHERE id=? AND status='pending'").bind(Date.now(), p.id),
           env.DB.prepare('UPDATE users SET premium_until=? WHERE id=?').bind(until, u.id)]);
-        const text = 'تم تفعيل اشتراك Premium (' + p.plan_name + ') على حسابك. استمتع بكل الروايات المقفولة 👑';
+        const text = 'تم تفعيل اشتراك Premium (' + p.plan_name + ') على حسابك. استمتع بالاستماع للروايات بصوت مصري 👑';
         try { await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(u.id, 'payment', 'pay', 'RadPad', '👑 اشتراكك اتفعّل', text, Date.now()).run(); if (env.FCM_SA) await sendPush(env, '👑 اشتراكك اتفعّل', text, '', 'u_' + u.id); } catch (e) {}
         return json({ ok: true, premiumUntil: until });
       }
@@ -875,7 +997,7 @@ async function route(request, env) {
       Object.keys(b.prices || {}).slice(0, 1000).forEach((k) => { const v = str(b.prices[k], 60).trim(); if (v) prices[str(k, 60)] = v; });
       const old0 = await getSetting(env, 'premium');
       await setSetting(env, 'premium', { whatsapp: str(b.whatsapp, 25).replace(/[^0-9+]/g, ''), defaultPrice: str(b.defaultPrice, 60).trim(), message: str(b.message, 300).trim(), prices,
-        plans: b.plans ? cleanPlans(b.plans) : old0.plans, methods: b.methods ? cleanMethods(b.methods, b.whatsapp) : old0.methods });
+        plans: b.plans ? cleanPlans(b.plans) : old0.plans, methods: b.methods ? cleanMethods(b.methods, b.whatsapp) : old0.methods, features: Array.isArray(b.features) ? cleanFeatures(b.features) : old0.features });
       return json({ ok: true, info: await getPremiumInfo(env) });
     }
     if (path === '/api/admin/vault' && m === 'PUT') {
