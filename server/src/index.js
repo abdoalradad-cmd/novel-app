@@ -472,8 +472,8 @@ async function azurePart(env, text, conf) {
 }
 /* ---- Edge (غير رسمي): نفس أصوات Azure العصبية عن طريق مدخل «القراءة بصوت عالٍ» في Edge. من غير مفتاح، وممكن يقف في أي وقت ---- */
 const EDGE_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
-async function edgeGec() { // توكن التحقق: SHA256 لـ (الوقت بالـ ticks مقرّب لـ 5 دقايق + التوكن)
-  let t = Math.floor(Date.now() / 1000) + 11644473600; t -= t % 300;
+async function edgeGec(skewMs = 0) { // توكن التحقق: SHA256 لـ (الوقت بالـ ticks مقرّب لـ 5 دقايق + التوكن)
+  let t = Math.floor((Date.now() + skewMs) / 1000) + 11644473600; t -= t % 300;
   const h = await crypto.subtle.digest('SHA-256', enc.encode(String(BigInt(t) * 10000000n) + EDGE_TOKEN));
   return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, '0')).join('').toUpperCase();
 }
@@ -483,11 +483,20 @@ function edgeSsml(runs, conf, plain) {
   return '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="ar-EG">' + runs.map((r) => { const o = v[r.role] || v.narrator; const t = xmlEsc(r.text); return '<voice name="' + xmlEsc(longName(o.v)) + '">' + (plain ? t : '<prosody rate="' + o.rate + '" pitch="' + o.pitch + '">' + t + '</prosody>') + '</voice>'; }).join('') + '</speak>';
 }
 const concatBytes = (list) => { let n = 0; list.forEach((b) => (n += b.length)); const o = new Uint8Array(n); let k = 0; list.forEach((b) => { o.set(b, k); k += b.length; }); return o; };
-async function edgeRequest(env, ssml, conf) { // بيرجّع MP3 (Uint8Array)
+const EDGE_VERS = ['143.0.3650.75', '140.0.3485.14', '130.0.2849.68'];
+async function edgeRequest(env, ssml, conf) { // لو اترفض (403) بنصحّح فرق الساعة ونجرّب إصدارات تانية
+  const vers = [conf.ed.ver, ...EDGE_VERS.filter((v) => v !== conf.ed.ver)]; let skew = 0, last;
+  for (let i = 0; i < 3; i++) {
+    try { return await edgeOnce(env, ssml, conf, vers[i], skew); }
+    catch (e) { last = e; if (e.status !== 403) throw e; if (e.dateMs) skew = e.dateMs - Date.now(); }
+  }
+  throw last;
+}
+async function edgeOnce(env, ssml, conf, ver, skew) { // بيرجّع MP3 (Uint8Array)
   const ts = new Date().toString().replace(/GMT.*$/, '') + 'GMT+0000 (Coordinated Universal Time)', rid = crypto.randomUUID().replace(/-/g, '');
-  const ver = conf.ed.ver, url = 'https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=' + EDGE_TOKEN + '&Sec-MS-GEC=' + (await edgeGec()) + '&Sec-MS-GEC-Version=1-' + ver + '&ConnectionId=' + crypto.randomUUID().replace(/-/g, '');
+  const url = 'https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=' + EDGE_TOKEN + '&Sec-MS-GEC=' + (await edgeGec(skew)) + '&Sec-MS-GEC-Version=1-' + ver + '&ConnectionId=' + crypto.randomUUID().replace(/-/g, '');
   const resp = await fetch(url, { headers: { Upgrade: 'websocket', Origin: 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + ver.split('.')[0] + '.0.0.0 Safari/537.36 Edg/' + ver, Pragma: 'no-cache', 'Cache-Control': 'no-cache', 'Accept-Language': 'en-US,en;q=0.9', Cookie: 'muid=' + [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('').toUpperCase() + ';' } });
-  const ws = resp.webSocket; if (!ws) { let bt = ''; try { bt = (await resp.text()).replace(/\s+/g, ' ').slice(0, 50); } catch (e) {} const e = new Error('edge_' + (resp.status || 'nows') + (bt ? ' ' + bt : '')); e.code = resp.status === 429 ? 429 : 502; throw e; }
+  const ws = resp.webSocket; if (!ws) { let bt = ''; try { bt = (await resp.text()).replace(/\s+/g, ' ').slice(0, 50); } catch (e) {} const hd = (n) => { try { return resp.headers.get(n) || ''; } catch (x) { return ''; } }; const dm = Date.parse(hd('date')); const e = new Error('edge_' + (resp.status || 'nows') + ' v' + ver + (hd('server') ? ' srv=' + hd('server') : '') + (dm ? ' skew=' + Math.round((dm - Date.now()) / 1000) + 's' : '') + (bt ? ' ' + bt : '')); e.status = resp.status; e.dateMs = dm || 0; e.code = resp.status === 429 ? 429 : 502; throw e; }
   ws.accept();
   return await new Promise((resolve, reject) => {
     const chunks = []; let done = false; const dec = new TextDecoder();
