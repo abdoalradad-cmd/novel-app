@@ -9,7 +9,7 @@ let jwtKeyCache = null;
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
-  'Access-Control-Allow-Headers': 'Authorization,Content-Type,X-Unlock',
+  'Access-Control-Allow-Headers': 'Authorization,Content-Type,X-Unlock,X-Device',
   'Access-Control-Max-Age': '86400'
 };
 function json(data, status = 200, extra = {}) {
@@ -66,11 +66,28 @@ async function readToken(env, token) {
     return p.exp > Date.now() ? p : null;
   } catch (e) { return null; }
 }
+/* ----- حد الأجهزة: المجاني جهاز واحد، البريميوم 3، الأدمن مفتوح. الجهاز بيبعت X-Device ----- */
+const SESS_TTL = 10 * 86400000, MAX_DEV_ACCTS = 2, devMsgs = new WeakMap();
+const devOf = (request) => { const d = request.headers.get('X-Device') || ''; return /^[A-Za-z0-9_-]{8,64}$/.test(d) ? d : ''; };
+const devBlockMsg = (u) => ((u.role === 'admin' || (u.premium_until || 0) > Date.now()) ? 'لا يمكنك الدخول، الحساب قيد التسجيل على 3 أجهزة' : 'لا يمكنك الدخول، الحساب قيد التسجيل على جهاز آخر');
+async function devEnter(env, u, dev) { // true = مسموح
+  if (!dev) return true;
+  const now = Date.now(), ex = await env.DB.prepare('SELECT seen FROM sessions WHERE uid=? AND dev=?').bind(u.id, dev).first();
+  if (ex) { if (now - ex.seen > 600000) await env.DB.prepare('UPDATE sessions SET seen=? WHERE uid=? AND dev=?').bind(now, u.id, dev).run(); return true; }
+  if (u.role !== 'admin') {
+    const lim = (u.premium_until || 0) > now ? 3 : 1;
+    const c = (await env.DB.prepare('SELECT COUNT(*) AS n FROM sessions WHERE uid=? AND seen>?').bind(u.id, now - SESS_TTL).first()).n;
+    if (c >= lim) return false;
+  }
+  await env.DB.prepare('INSERT OR REPLACE INTO sessions (uid,dev,seen,created) VALUES (?,?,?,?)').bind(u.id, dev, now, now).run(); return true;
+}
 async function authUser(env, request) {
   const h = request.headers.get('Authorization') || '';
   const m = /^Bearer (.+)$/.exec(h); if (!m) return null;
   const p = await readToken(env, m[1]); if (!p) return null;
-  return env.DB.prepare('SELECT id,email,name,role,premium_until,avatar,bio,links FROM users WHERE id=?').bind(p.uid).first();
+  const u = await env.DB.prepare('SELECT id,email,name,role,premium_until,avatar,bio,links FROM users WHERE id=?').bind(p.uid).first();
+  if (u && !(await devEnter(env, u, devOf(request)))) { devMsgs.set(request, devBlockMsg(u)); return null; }
+  return u;
 }
 const linksOf = (v) => { let o = {}; try { o = typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}); } catch (e) {} const out = {}; for (const k of ['facebook', 'wattpad', 'youtube']) out[k] = (typeof o[k] === 'string') ? cleanUrl(o[k]) : ''; return out; };
 const FOREVER = 32503680000000;
@@ -94,6 +111,8 @@ async function ensureSchema(env) {
     'CREATE TABLE IF NOT EXISTS reads (k TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0)',
     'CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL, kind TEXT NOT NULL, novel_id INTEGER NOT NULL, title TEXT NOT NULL, ts INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)',
+    'CREATE TABLE IF NOT EXISTS sessions (uid INTEGER NOT NULL, dev TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (uid, dev))',
+    'CREATE TABLE IF NOT EXISTS dev_accts (dev TEXT NOT NULL, uid INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (dev, uid))',
     'CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, kind TEXT NOT NULL, novel_ref TEXT NOT NULL, who TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, ts INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS idx_notes_uid ON notes(uid, ts)',
     'CREATE TABLE IF NOT EXISTS payments (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, plan_id TEXT NOT NULL, plan_name TEXT NOT NULL, months INTEGER NOT NULL, amount TEXT NOT NULL, method TEXT NOT NULL, sender TEXT NOT NULL, proof TEXT NOT NULL, note TEXT NOT NULL DEFAULT \'\', status TEXT NOT NULL DEFAULT \'pending\', reason TEXT NOT NULL DEFAULT \'\', created_at INTEGER NOT NULL, decided_at INTEGER NOT NULL DEFAULT 0)',
@@ -611,7 +630,7 @@ async function contestPublic(env, me) {
 }
 async function pointsPublic(env, me) {
   const cur = weekStart(), pts = await getSetting(env, 'pts');
-  const { results: top } = await env.DB.prepare("SELECT id,name,avatar,points FROM users WHERE role!='admin' AND points>0 ORDER BY points DESC,id ASC LIMIT 10").all();
+  const { results: top } = await env.DB.prepare("SELECT id,name,avatar,points FROM users WHERE points>0 ORDER BY points DESC,id ASC LIMIT 10").all();
   const { results: draws } = await env.DB.prepare('SELECT week,user_id AS winner_id,name,avatar,points,prize,ts AS picked_at FROM pts_draws WHERE user_id>0 ORDER BY week DESC LIMIT 8').all();
   const d = draws[0] || null;
   return { week: cur, prize: pts.prize || 0, endsAt: weekEndMs(cur), top: top.map((u) => ({ id: u.id, name: u.name, avatar: u.avatar || '', points: u.points })), latest: d, thisWeek: !!(d && d.week === cur), history: draws.slice(1),
@@ -621,7 +640,7 @@ const randInt = (n) => { const a = new Uint32Array(1); crypto.getRandomValues(a)
 async function ptsDraw(env, force) { // بيختار واحد عشوائي من أعلى 10 حسابات نقاط
   const pts = await getSetting(env, 'pts'), cur = weekStart();
   if (!force && !(pts.prize > 0)) return { ok: false, idle: 'no_prize' };
-  const { results } = await env.DB.prepare("SELECT id,name,avatar,points FROM users WHERE role!='admin' AND points>0 ORDER BY points DESC,id ASC LIMIT 10").all();
+  const { results } = await env.DB.prepare("SELECT id,name,avatar,points FROM users WHERE points>0 ORDER BY points DESC,id ASC LIMIT 10").all();
   if (!results.length) { if (!force) await env.DB.prepare('INSERT OR IGNORE INTO pts_draws (week,user_id,name,avatar,points,prize,ts) VALUES (?,?,?,?,?,?,?)').bind(cur, 0, '', '', 0, pts.prize || 0, Date.now()).run(); return { ok: false, idle: 'no_candidates' }; }
   const w = results[randInt(results.length)];
   await env.DB.prepare('INSERT OR REPLACE INTO pts_draws (week,user_id,name,avatar,points,prize,ts) VALUES (?,?,?,?,?,?,?)').bind(cur, w.id, w.name, w.avatar || '', w.points, pts.prize || 0, Date.now()).run();
@@ -668,7 +687,7 @@ export default {
   },
   // كل دقيقة: يكمّل تحويل الفصول في الطابور (بحد يومي)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureSchema(env); try { await ptsTick(env); } catch (e) {} if (await ttsMigrate(env)) await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureSchema(env); try { await ptsTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } catch (e) {} })());
   }
 };
 
@@ -689,6 +708,8 @@ async function route(request, env) {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return fail('الإيميل غير صحيح');
     if (name.length < 2) return fail('اكتب اسمك (حرفين على الأقل)');
     if (pass.length < 8 || pass.length > 100) return fail('الباسورد لازم يكون 8 حروف أو أكتر');
+    const dev = devOf(request);
+    if (dev && (await env.DB.prepare('SELECT COUNT(*) AS n FROM dev_accts WHERE dev=?').bind(dev).first()).n >= MAX_DEV_ACCTS) return fail('أنت تمتلك الآن حسابين، لا يمكنك عمل حساب آخر', 403);
     if (await env.DB.prepare('SELECT 1 FROM users WHERE email=?').bind(email).first()) return fail('الإيميل ده مسجّل قبل كده');
     await noteAttempt(env, 'reg:' + ip);
     const count = (await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first()).n;
@@ -696,6 +717,7 @@ async function route(request, env) {
     const r = await env.DB.prepare('INSERT INTO users (email,name,pass_hash,role,created_at) VALUES (?,?,?,?,?)')
       .bind(email, name, await hashPassword(pass), role, Date.now()).run();
     const id = r.meta.last_row_id;
+    if (dev) { await env.DB.prepare('INSERT OR IGNORE INTO dev_accts (dev,uid,ts) VALUES (?,?,?)').bind(dev, id, Date.now()).run(); await devEnter(env, { id, role, premium_until: 0 }, dev); }
     return json({ token: await makeToken(env, id), user: userOut({ id, email, name, role, premium_until: 0 }) });
   }
   if (path === '/api/login' && m === 'POST') {
@@ -705,6 +727,7 @@ async function route(request, env) {
     if (await tooMany(env, key, 10, 900000)) return fail('محاولات كتير، استنى ربع ساعة وجرّب تاني', 429);
     const u = await env.DB.prepare('SELECT id,email,name,role,pass_hash,premium_until,avatar,bio,links FROM users WHERE email=?').bind(email).first();
     if (!u || !(await checkPassword(String(b.password || ''), u.pass_hash))) { await noteAttempt(env, key); return fail('الإيميل أو الباسورد غلط', 401); }
+    if (!(await devEnter(env, u, devOf(request)))) return fail(devBlockMsg(u), 403);
     return json({ token: await makeToken(env, u.id), user: userOut(u) });
   }
 
@@ -797,7 +820,13 @@ async function route(request, env) {
 
   /* ----- كل ما بعد كده يحتاج تسجيل دخول ----- */
   const user = await authUser(env, request);
-  if (!user) return fail('سجّل الدخول الأول', 401);
+  if (!user) return fail(devMsgs.get(request) || 'سجّل الدخول الأول', 401);
+  if (path === '/api/logout' && m === 'POST') { const dv = devOf(request); if (dv) await env.DB.prepare('DELETE FROM sessions WHERE uid=? AND dev=?').bind(user.id, dv).run(); return json({ ok: true }); }
+  if (path === '/api/devices' && m === 'GET') {
+    const { results } = await env.DB.prepare('SELECT dev,seen,created FROM sessions WHERE uid=? AND seen>? ORDER BY seen DESC').bind(user.id, Date.now() - SESS_TTL).all(), cur = devOf(request);
+    return json({ limit: user.role === 'admin' ? 0 : (isPremium(user) ? 3 : 1), devices: results.map((d) => ({ id: d.dev, seen: d.seen, created: d.created, current: d.dev === cur })) });
+  }
+  if (path === '/api/devices/remove' && m === 'POST') { const b = await body(request, 300), id = str(b.id, 64); await env.DB.prepare('DELETE FROM sessions WHERE uid=? AND dev=?').bind(user.id, id).run(); return json({ ok: true }); }
 
   if (path === '/api/contest/answer' && m === 'POST') {
     const b = await body(request, 6000), cur = weekStart(), row = await env.DB.prepare('SELECT * FROM contest_weeks WHERE week=?').bind(cur).first();
@@ -1240,7 +1269,7 @@ async function route(request, env) {
     }
     /* ----- نقاط الفوز (أدمن) ----- */
     if (path === '/api/admin/points' && m === 'GET') {
-      const pts = await getSetting(env, 'pts'), { results: top } = await env.DB.prepare("SELECT id,name,email,avatar,points FROM users WHERE role!='admin' AND points>0 ORDER BY points DESC,id ASC LIMIT 10").all();
+      const pts = await getSetting(env, 'pts'), { results: top } = await env.DB.prepare("SELECT id,name,email,avatar,points FROM users WHERE points>0 ORDER BY points DESC,id ASC LIMIT 10").all();
       const { results: draws } = await env.DB.prepare('SELECT week,user_id,name,points,prize,ts FROM pts_draws ORDER BY week DESC LIMIT 12').all();
       return json({ prize: pts.prize || 0, start: pts.start || '', week: weekStart(), nextDraw: weekEndMs(weekStart()), top, draws });
     }
@@ -1333,6 +1362,7 @@ async function route(request, env) {
       await sendPush(env, str(b.title, 80).trim(), str(b.text, 300).trim(), cleanUrl(b.url));
       return json({ ok: true });
     }
+    if ((g = /^\/api\/admin\/users\/(\d+)\/devices\/reset$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM sessions WHERE uid=?').bind(+g[1]).run(); return json({ ok: true }); }
     if ((g = /^\/api\/admin\/users\/(\d+)\/premium$/.exec(path)) && m === 'POST') {
       const b = await body(request, 2000);
       const u = await env.DB.prepare('SELECT id,premium_until FROM users WHERE id=?').bind(+g[1]).first();
