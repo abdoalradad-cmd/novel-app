@@ -285,13 +285,14 @@ const AZ_VOICES = { narrator: { v: 'ar-SA-HamedNeural', rate: '-4%', pitch: '0%'
   boy: { v: 'ar-EG-ShakirNeural', rate: '+6%', pitch: '+38%' }, girl: { v: 'ar-EG-SalmaNeural', rate: '+6%', pitch: '+30%' } };
 const TTS_DEFAULT = { model: 'gemini-3.8-flash-tts', legacyModel: 'gemini-2.5-flash-preview-tts', style: 'warm, expressive audiobook narration in natural Egyptian Arabic', concurrency: 2, dailyMin: 20, freeMin: 0, priceIn: 0, priceOut: 0,
   gv: G_VOICES, defProv: 'gemini', novelProv: {}, multi: true, az: { region: '', dailyMin: 30, freeChars: 500000, price: 15, concurrency: 3, voices: AZ_VOICES } };
-const PROVS = ['gemini', 'gemini2', 'azure', 'edge'];
+const PROVS = ['gemini', 'gemini2', 'gemini3', 'azure'];
 const normProv = (p) => (PROVS.includes(p) ? p : 'gemini');
 const isGem = (p) => p !== 'azure';
-// مفتاح جوجل لكل مزوّد (gemini2 = حساب جوجل تاني بمفتاح مختلف)
-const gemEnv = (env, prov) => (prov === 'gemini2' ? { ...env, GEMINI_API_KEY: env.GEMINI_API_KEY_2 } : env);
-const provCap = (conf, prov) => (prov === 'azure' ? conf.az.dailyMin : prov === 'edge' ? conf.ed.dailyMin : prov === 'gemini2' ? conf.g2.dailyMin : conf.dailyMin);
-const provPar = (conf, prov) => (prov === 'azure' ? conf.az.concurrency : prov === 'edge' ? conf.ed.concurrency : prov === 'gemini2' ? conf.g2.concurrency : conf.concurrency);
+// مفتاح جوجل لكل مزوّد (gemini2 / gemini3 = حساب جوجل تاني وتالت بمفاتيح مختلفة)
+const gemKey = (env, prov) => (prov === 'gemini3' ? env.GEMINI_API_KEY_3 : prov === 'gemini2' ? env.GEMINI_API_KEY_2 : env.GEMINI_API_KEY);
+const gemEnv = (env, prov) => (prov === 'gemini' ? env : { ...env, GEMINI_API_KEY: gemKey(env, prov) });
+const provCap = (conf, prov) => (prov === 'azure' ? conf.az.dailyMin : prov === 'gemini2' ? conf.g2.dailyMin : prov === 'gemini3' ? conf.g3.dailyMin : conf.dailyMin);
+const provPar = (conf, prov) => (prov === 'azure' ? conf.az.concurrency : prov === 'gemini2' ? conf.g2.concurrency : prov === 'gemini3' ? conf.g3.concurrency : conf.concurrency);
 async function getTtsConf(env) {
   const x = await getSetting(env, 'tts'), n = (v, d, lo, hi) => { const k = Number(v); return v !== '' && v != null && Number.isFinite(k) && k >= lo && k <= hi ? k : d; };
   const gv = {}; ROLES.forEach((r) => { const v = x.gv && x.gv[r]; gv[r] = /^[A-Za-z0-9_-]{2,40}$/.test(String(v || '')) ? String(v) : G_VOICES[r]; });
@@ -302,11 +303,11 @@ async function getTtsConf(env) {
     concurrency: n(x.concurrency, TTS_DEFAULT.concurrency, 1, 4), dailyMin: n(x.dailyMin, TTS_DEFAULT.dailyMin, 0, 100000), freeMin: n(x.freeMin, 0, 0, 100000), priceIn: n(x.priceIn, 0, 0, 1000), priceOut: n(x.priceOut, 0, 0, 1000),
     defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false,
     g2: { dailyMin: n((x.g2 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g2 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g2 || {}).concurrency, 2, 1, 4) },
-    ed: { dailyMin: n((x.ed || {}).dailyMin, 120, 0, 100000), concurrency: n((x.ed || {}).concurrency, 2, 1, 4), ver: /^\d{2,3}(\.\d{1,5}){3}$/.test(String((x.ed || {}).ver || '')) ? String(x.ed.ver) : '143.0.3650.75' },
+    g3: { dailyMin: n((x.g3 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g3 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g3 || {}).concurrency, 2, 1, 4) },
     az: { region: /^[a-z0-9-]{3,30}$/.test(String(xa.region || '')) ? String(xa.region) : '', dailyMin: n(xa.dailyMin, 30, 0, 100000), freeChars: n(xa.freeChars, 500000, 0, 1e9), price: n(xa.price, 15, 0, 1000), concurrency: n(xa.concurrency, 3, 1, 8), voices } };
 }
 const azRegion = (env, conf) => conf.az.region || String(env.AZURE_SPEECH_REGION || '').trim().toLowerCase();
-const provReady = (env, conf, prov) => !!env.TTS_BUCKET && (prov === 'edge' ? true : prov === 'azure' ? !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)) : prov === 'gemini2' ? !!env.GEMINI_API_KEY_2 : !!env.GEMINI_API_KEY);
+const provReady = (env, conf, prov) => !!env.TTS_BUCKET && (prov === 'azure' ? !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)) : !!gemKey(env, prov));
 function ttsPrices(conf, now = Date.now()) { const late = now >= Date.UTC(2027, 0, 1); return { inP: conf.priceIn || (late ? 1 : 0.5), outP: conf.priceOut || (late ? 18 : 9) }; }
 function ttsCost(chars, secs, conf) { const p = ttsPrices(conf); return (Math.ceil(chars / 2.5) * p.inP + secs * 25 * p.outP) / 1e6; }
 const dayKey = (t = Date.now()) => new Date(t + 2 * 3600000).toISOString().slice(0, 10); // بتوقيت مصر تقريبًا
@@ -351,7 +352,8 @@ const reSpF = new RegExp('(?:^|[\\s،,.:؛"«»\\-])[وف]?(?:' + SP_F.join('|')
 const reKidG = /(?:^|[\s،,.:؛])(?:ال)?(?:طفلة|صغيرة|بنت صغيرة|فتاة صغيرة|البنت الصغيرة|الفتاة الصغيرة|طفلتي|طفلتها|بنتها الصغيرة)(?=[\s،,.:؛]|$)/;
 const reKidB = /(?:^|[\s،,.:؛])(?:ال)?(?:طفل|صغير|ولد صغير|صبي|غلام|الولد الصغير|طفلي|طفلها)(?=[\s،,.:؛]|$)/;
 function guessSpeaker(after, before) {
-  for (const ctx of [after, before]) {
+  const bf = /[:：]\s*$/.test(before || ''); // «قال أحمد: «...»» → المتكلم اللي قبل النقطتين
+  for (const ctx of (bf ? [before, after] : [after, before])) {
     if (!ctx) continue;
     const n = AR_NORM(ctx), f = reSpF.test(n), m = reSpM.test(n);
     const kg = reKidG.test(n), kb = reKidB.test(n);
@@ -470,67 +472,8 @@ async function azurePart(env, text, conf) {
   const runs = conf.multi ? segmentRoles(text) : [{ role: 'narrator', text: stripMarks(text) }];
   const wav = await azureSpeakRuns(env, runs, conf); return { wav, chars: runs.reduce((a, r) => a + r.text.length, 0), calls: 1 };
 }
-/* ---- Edge (غير رسمي): نفس أصوات Azure العصبية عن طريق مدخل «القراءة بصوت عالٍ» في Edge. من غير مفتاح، وممكن يقف في أي وقت ---- */
-const EDGE_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
-async function edgeGec(skewMs = 0) { // توكن التحقق: SHA256 لـ (الوقت بالـ ticks مقرّب لـ 5 دقايق + التوكن)
-  let t = Math.floor((Date.now() + skewMs) / 1000) + 11644473600; t -= t % 300;
-  const h = await crypto.subtle.digest('SHA-256', enc.encode(String(BigInt(t) * 10000000n) + EDGE_TOKEN));
-  return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, '0')).join('').toUpperCase();
-}
-function edgeSsml(runs, conf, plain) {
-  const v = conf.az.voices;
-  const longName = (n) => { const m = /^([a-z]{2,3})-([A-Z]{2,4})-(.+Neural)$/.exec(n); return m ? 'Microsoft Server Speech Text to Speech Voice (' + m[1] + '-' + m[2] + ', ' + m[3] + ')' : n; };
-  return '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="ar-EG">' + runs.map((r) => { const o = v[r.role] || v.narrator; const t = xmlEsc(r.text); return '<voice name="' + xmlEsc(longName(o.v)) + '">' + (plain ? t : '<prosody rate="' + o.rate + '" pitch="' + o.pitch + '">' + t + '</prosody>') + '</voice>'; }).join('') + '</speak>';
-}
-const concatBytes = (list) => { let n = 0; list.forEach((b) => (n += b.length)); const o = new Uint8Array(n); let k = 0; list.forEach((b) => { o.set(b, k); k += b.length; }); return o; };
-const EDGE_VERS = ['143.0.3650.75', '140.0.3485.14', '130.0.2849.68'];
-async function edgeRequest(env, ssml, conf) { // لو اترفض (403) بنصحّح فرق الساعة ونجرّب إصدارات تانية
-  const vers = [conf.ed.ver, ...EDGE_VERS.filter((v) => v !== conf.ed.ver)]; let skew = 0, last;
-  for (let i = 0; i < 3; i++) {
-    try { return await edgeOnce(env, ssml, conf, vers[i], skew); }
-    catch (e) { last = e; if (e.status !== 403) throw e; if (e.dateMs) skew = e.dateMs - Date.now(); }
-  }
-  throw last;
-}
-async function edgeOnce(env, ssml, conf, ver, skew) { // بيرجّع MP3 (Uint8Array)
-  const ts = new Date().toString().replace(/GMT.*$/, '') + 'GMT+0000 (Coordinated Universal Time)', rid = crypto.randomUUID().replace(/-/g, '');
-  const url = 'https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=' + EDGE_TOKEN + '&Sec-MS-GEC=' + (await edgeGec(skew)) + '&Sec-MS-GEC-Version=1-' + ver + '&ConnectionId=' + crypto.randomUUID().replace(/-/g, '');
-  const resp = await fetch(url, { headers: { Upgrade: 'websocket', Origin: 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + ver.split('.')[0] + '.0.0.0 Safari/537.36 Edg/' + ver, Pragma: 'no-cache', 'Cache-Control': 'no-cache', 'Accept-Language': 'en-US,en;q=0.9', Cookie: 'muid=' + [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('').toUpperCase() + ';' } });
-  const ws = resp.webSocket; if (!ws) { let bt = ''; try { bt = (await resp.text()).replace(/\s+/g, ' ').slice(0, 50); } catch (e) {} const hd = (n) => { try { return resp.headers.get(n) || ''; } catch (x) { return ''; } }; const dm = Date.parse(hd('date')); const e = new Error('edge_' + (resp.status || 'nows') + ' v' + ver + (hd('server') ? ' srv=' + hd('server') : '') + (dm ? ' skew=' + Math.round((dm - Date.now()) / 1000) + 's' : '') + (bt ? ' ' + bt : '')); e.status = resp.status; e.dateMs = dm || 0; e.code = resp.status === 429 ? 429 : 502; throw e; }
-  ws.accept();
-  return await new Promise((resolve, reject) => {
-    const chunks = []; let done = false; const dec = new TextDecoder();
-    const fin = (fn, x) => { if (done) return; done = true; clearTimeout(tm); try { ws.close(1000, 'bye'); } catch (e) {} fn(x); };
-    const tm = setTimeout(() => { const e = new Error('edge_timeout'); e.code = 502; fin(reject, e); }, 25000);
-    ws.addEventListener('message', (ev) => {
-      const d = ev.data;
-      if (typeof d === 'string') { if (/Path:turn\.end/.test(d)) { const a = concatBytes(chunks); if (a.length < 100) { const e = new Error('no_audio'); e.code = 502; fin(reject, e); } else fin(resolve, a); } return; }
-      const u = d instanceof ArrayBuffer ? new Uint8Array(d) : new Uint8Array(d.buffer ? d.buffer : d); if (u.length < 2) return;
-      const hl = (u[0] << 8) | u[1]; if (hl + 2 > u.length) return;
-      if (/Path:audio/.test(dec.decode(u.subarray(2, 2 + hl)))) chunks.push(u.subarray(2 + hl));
-    });
-    ws.addEventListener('error', () => { const e = new Error('edge_ws_error'); e.code = 502; fin(reject, e); });
-    ws.addEventListener('close', () => { if (!done) { const a = concatBytes(chunks); if (a.length > 100) fin(resolve, a); else { const e = new Error('edge_closed'); e.code = 502; fin(reject, e); } } });
-    ws.send('X-Timestamp:' + ts + '\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}\r\n');
-    ws.send('X-RequestId:' + rid + '\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:' + ts + 'Z\r\nPath:ssml\r\n\r\n' + ssml);
-  });
-}
-async function edgePart(env, text, conf) {
-  const runs = conf.multi ? segmentRoles(text) : [{ role: 'narrator', text: stripMarks(text) }]; let mp3, calls = 1;
-  try { mp3 = await edgeRequest(env, edgeSsml(runs, conf, false), conf); }
-  catch (e) {
-    if (e.code === 429) throw e;
-    try { mp3 = await edgeRequest(env, edgeSsml(runs, conf, true), conf); calls++; } // من غير pitch/rate لو الخدمة رفضتهم
-    catch (e2) {
-      if (e2.code === 429 || runs.length < 2) throw e2;
-      const parts = []; for (const r of runs) { parts.push(await edgeRequest(env, edgeSsml([r], conf, true), conf)); calls++; } mp3 = concatBytes(parts); // كل دور في طلب لوحده
-    }
-  }
-  return { wav: mp3, mime: 'audio/mpeg', chars: runs.reduce((a, r) => a + r.text.length, 0), calls };
-}
-const audioSecs = (b) => (b.length > 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 ? Math.max(0, b.length - 44) / 48000 : b.length / 6000);
-const speakPart = (env, prov, text, conf) => (prov === 'azure' ? azurePart(env, text, conf) : prov === 'edge' ? edgePart(env, text, conf) : geminiPart(gemEnv(env, prov), text, conf));
-const audioResp = (obj, hit, mime) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': (obj.httpMetadata && obj.httpMetadata.contentType) || mime || 'audio/wav', 'Cache-Control': 'private, max-age=86400', 'X-Cache': hit ? 'HIT' : 'MISS' } });
+const speakPart = (env, prov, text, conf) => (prov === 'azure' ? azurePart(env, text, conf) : geminiPart(gemEnv(env, prov), text, conf));
+const audioResp = (obj, hit) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'private, max-age=86400', 'X-Cache': hit ? 'HIT' : 'MISS' } });
 const CPS = 14; // حروف في الثانية تقريبًا (لتقدير المدة والتكلفة قبل التحويل)
 const hasLetters = (t) => /[؀-ۿA-Za-z0-9]/.test(t);
 // يقسّم نص الفصل لأجزاء (≤700 حرف) على حدود الفقرات/الجمل. بيرجّع [[بداية،نهاية]] بالنسبة للنص الأصلي
@@ -565,8 +508,8 @@ async function ttsBump(env, prov, cols) {
   const sets = Object.keys(cols).map((k) => k + '=' + k + '+?').join(',');
   await env.DB.prepare('UPDATE tts_use SET ' + sets + ' WHERE day=? AND prov=?').bind(...Object.values(cols), d, prov).run();
 }
-const stKey = (prov) => (prov === 'azure' ? 'tts_state_az' : prov === 'edge' ? 'tts_state_ed' : prov === 'gemini2' ? 'tts_state_g2' : 'tts_state');
-const PNAME = { gemini: 'جوجل (Gemini)', gemini2: 'جوجل (Gemini 2)', azure: 'مايكروسوفت (Azure)', edge: 'مايكروسوفت (Edge)' };
+const stKey = (prov) => (prov === 'azure' ? 'tts_state_az' : prov === 'gemini2' ? 'tts_state_g2' : prov === 'gemini3' ? 'tts_state_g3' : 'tts_state');
+const PNAME = { gemini: 'جوجل (Gemini)', gemini2: 'جوجل (Gemini 2)', gemini3: 'جوجل (Gemini 3)', azure: 'مايكروسوفت (Azure)' };
 async function ttsAlertAdmins(env, title, text, prov = 'gemini') {
   const key = stKey(prov), st = await getSetting(env, key), now = Date.now();
   if (st.alertAt && now - st.alertAt < 6 * 3600000) return;
@@ -612,15 +555,15 @@ async function ttsStep(env, opts = {}) {
     const res = await Promise.allSettled(idxs.map(async (p) => {
       const txt = ch.text.slice(parts[p][0], parts[p][1]).trim();
       const o = await speakPart(env, prov, txt, conf);
-      await env.TTS_BUCKET.put('c/' + ch.id + '/' + p + '.wav', o.wav, { httpMetadata: { contentType: o.mime || 'audio/wav' } });
-      return { secs: audioSecs(o.wav), chars: o.chars, calls: o.calls };
+      await env.TTS_BUCKET.put('c/' + ch.id + '/' + p + '.wav', o.wav, { httpMetadata: { contentType: 'audio/wav' } });
+      return { secs: Math.max(0, o.wav.length - 44) / 48000, chars: o.chars, calls: o.calls };
     }));
     let prefix = true, limited = false;
     for (let k = 0; k < res.length; k++) {
       const x = res[k];
       if (x.status === 'fulfilled') {
         used += x.value.secs; secsTot += prefix ? x.value.secs : 0; made++;
-        await ttsBump(env, prov, { reqs: x.value.calls || 1, chars: x.value.chars, secs: x.value.secs, cost: prov === 'azure' ? x.value.chars * conf.az.price / 1e6 : prov === 'edge' ? 0 : ttsCost(x.value.chars, x.value.secs, conf) });
+        await ttsBump(env, prov, { reqs: x.value.calls || 1, chars: x.value.chars, secs: x.value.secs, cost: prov === 'azure' ? x.value.chars * conf.az.price / 1e6 : ttsCost(x.value.chars, x.value.secs, conf) });
         if (prefix) done++;
       } else {
         prefix = false; const e = x.reason || {};
@@ -646,7 +589,7 @@ async function ttsStats(env) {
   const sum = async (prov, where, ...a) => env.DB.prepare('SELECT COALESCE(SUM(reqs),0) AS reqs,COALESCE(SUM(chars),0) AS chars,COALESCE(SUM(secs),0) AS secs,COALESCE(SUM(cost),0) AS cost,COALESCE(SUM(fails),0) AS fails,COALESCE(SUM(limited),0) AS limited FROM tts_use WHERE prov=? AND ' + where).bind(prov, ...a).first();
   const { results: novels } = await env.DB.prepare("SELECT nid,MAX(ntitle) AS title,MIN(ord) AS ord,MAX(prov) AS prov,COUNT(*) AS n,SUM(status='done') AS d,SUM(LENGTH(text)) AS chars,SUM(CASE WHEN status='done' THEN 0 ELSE LENGTH(text)*(1.0-done*1.0/(CASE WHEN nparts<1 THEN 1 ELSE nparts END)) END) AS rem FROM tts_ch GROUP BY nid ORDER BY MIN(ord),nid LIMIT 120").all();
   const q = await env.DB.prepare('SELECT prov,status,COUNT(*) AS n FROM tts_ch GROUP BY prov,status').all();
-  const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { edge: true, gemini: !!env.GEMINI_API_KEY, gemini2: !!env.GEMINI_API_KEY_2, azure: !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)), azureKey: !!env.AZURE_SPEECH_KEY, azureRegion: azRegion(env, conf) }, prov: {}, prices: pr,
+  const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { gemini: !!env.GEMINI_API_KEY, gemini2: !!env.GEMINI_API_KEY_2, gemini3: !!env.GEMINI_API_KEY_3, azure: !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)), azureKey: !!env.AZURE_SPEECH_KEY, azureRegion: azRegion(env, conf) }, prov: {}, prices: pr,
     chapters: { queued: 0, running: 0, done: 0, failed: 0 }, novels: novels.map((r) => ({ nid: r.nid, title: r.title, ord: r.ord, prov: r.prov, n: r.n, d: r.d || 0, rem: Math.round(r.rem || 0) })) };
   q.results.forEach((r) => (out.chapters[r.status] = (out.chapters[r.status] || 0) + r.n));
   out.hasKey = out.has.gemini;
@@ -659,14 +602,11 @@ async function ttsStats(env) {
     if (prov === 'azure') {
       o.freeChars = conf.az.freeChars; o.monthPct = conf.az.freeChars ? Math.min(999, Math.round(month.chars / conf.az.freeChars * 100)) : null; o.extraCostMonth = Math.max(0, month.chars - conf.az.freeChars) * conf.az.price / 1e6;
       o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: remChars * conf.az.price / 1e6, days: cap ? Math.ceil(remSecs / cap) : null };
-    } else if (prov === 'edge') {
-      o.free = true; o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: 0, days: cap ? Math.ceil(remSecs / cap) : null };
     } else {
-      const fm = prov === 'gemini2' ? conf.g2.freeMin : conf.freeMin, freeSecs = fm * 60, extraSecs = Math.max(0, today.secs - freeSecs);
+      const fm = prov === 'gemini2' ? conf.g2.freeMin : prov === 'gemini3' ? conf.g3.freeMin : conf.freeMin, freeSecs = fm * 60, extraSecs = Math.max(0, today.secs - freeSecs);
       o.freeMin = fm; o.freeUsedPct = freeSecs ? Math.min(999, Math.round(today.secs / freeSecs * 100)) : null; o.extraCostToday = freeSecs ? (extraSecs * 25 * pr.outP) / 1e6 : null;
       o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: ttsCost(remChars, remSecs, conf), days: cap ? Math.ceil(remSecs / cap) : null };
     }
-    const le = await env.DB.prepare("SELECT err FROM tts_ch WHERE prov=? AND err!='' ORDER BY updated DESC LIMIT 1").bind(prov).first(); o.lastErr = le ? le.err : '';
     out.prov[prov] = o;
   }
   return out;
@@ -1229,8 +1169,21 @@ async function route(request, env) {
         concurrency: nu(b.concurrency, cur.concurrency, 1, 4), dailyMin: nu(b.dailyMin, cur.dailyMin, 0, 100000), freeMin: nu(b.freeMin, cur.freeMin, 0, 100000), priceIn: nu(b.priceIn, cur.priceIn, 0, 1000), priceOut: nu(b.priceOut, cur.priceOut, 0, 1000),
         defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, multi: b.multi == null ? cur.multi : !!b.multi, az,
         g2: { dailyMin: nu((b.g2 || {}).dailyMin, cur.g2.dailyMin, 0, 100000), freeMin: nu((b.g2 || {}).freeMin, cur.g2.freeMin, 0, 100000), concurrency: nu((b.g2 || {}).concurrency, cur.g2.concurrency, 1, 4) },
-        ed: { dailyMin: nu((b.ed || {}).dailyMin, cur.ed.dailyMin, 0, 100000), concurrency: nu((b.ed || {}).concurrency, cur.ed.concurrency, 1, 4), ver: /^\d{2,3}(\.\d{1,5}){3}$/.test(String((b.ed || {}).ver || '').trim()) ? String(b.ed.ver).trim() : cur.ed.ver } });
+        g3: { dailyMin: nu((b.g3 || {}).dailyMin, cur.g3.dailyMin, 0, 100000), freeMin: nu((b.g3 || {}).freeMin, cur.g3.freeMin, 0, 100000), concurrency: nu((b.g3 || {}).concurrency, cur.g3.concurrency, 1, 4) } });
       return json({ ok: true, ...(await ttsStats(env)) });
+    }
+    // فحص: السيرفر شايف كام صوت في فصل متخزّن؟
+    if (path === '/api/admin/tts/inspect' && m === 'GET') {
+      const nid = str(url.searchParams.get('nid'), 80), ix = url.searchParams.get('idx');
+      const c = ix != null && ix !== '' ? await env.DB.prepare('SELECT idx,status,prov,text,parts,updated FROM tts_ch WHERE nid=? AND idx=?').bind(nid, parseInt(ix, 10)).first()
+        : await env.DB.prepare("SELECT idx,status,prov,text,parts,updated FROM tts_ch WHERE nid=? ORDER BY (LENGTH(text)-LENGTH(REPLACE(text,'«',''))+LENGTH(text)-LENGTH(REPLACE(text,'-',''))) DESC, idx ASC LIMIT 1").bind(nid).first();
+      if (!c) return fail('الفصل مش في الطابور', 404);
+      const text = c.text, lines = text.split('\n'), dashLines = lines.filter((l) => /^\s*[-–—]/.test(l)).length, quotes = (text.match(/[«"“]/g) || []).length;
+      const runs = segmentRoles(text), roles = {}; runs.forEach((r) => (roles[r.role] = (roles[r.role] || 0) + r.text.length));
+      const parts = JSON.parse(c.parts || '[]'); let multi = 0; const sample = [];
+      parts.forEach((pr) => { const rr = segmentRoles(text.slice(pr[0], pr[1]).trim()), rs = [...new Set(rr.map((r) => r.role))]; if (rs.length > 1) { multi++; if (sample.length < 2) sample.push({ roles: rs, text: text.slice(pr[0], pr[1]).trim().slice(0, 140) }); } });
+      const conf = await getTtsConf(env);
+      return json({ idx: c.idx, status: c.status, prov: c.prov, multiOn: conf.multi, chars: text.length, dashLines, quotes, roles, parts: parts.length, multiParts: multi, sample });
     }
     if (path === '/api/admin/tts/known' && m === 'GET') {
       const { results } = await env.DB.prepare('SELECT nid,idx,sig FROM tts_ch').all(), sigs = {};
@@ -1284,15 +1237,14 @@ async function route(request, env) {
     // تجربة الصوت بنص فيه راوي وراجل وست وطفل (بالمزوّد المطلوب)
     if (path === '/api/admin/tts/test' && m === 'POST') {
       const b = await body(request, 3000), conf = await getTtsConf(env), prov = normProv(b.prov);
-      if (!provReady({ ...env, TTS_BUCKET: env.TTS_BUCKET || {} }, conf, prov)) return fail(prov === 'azure' ? 'مفتاح Azure أو المنطقة (Region) ناقصين' : (prov === 'gemini2' ? 'مفتاح Gemini 2 مش متحط على السيرفر' : 'مفتاح Gemini مش متحط على السيرفر'), 503);
+      if (!provReady({ ...env, TTS_BUCKET: env.TTS_BUCKET || {} }, conf, prov)) return fail(prov === 'azure' ? 'مفتاح Azure أو المنطقة (Region) ناقصين' : (prov === 'gemini3' ? 'مفتاح Gemini 3 مش متحط على السيرفر' : prov === 'gemini2' ? 'مفتاح Gemini 2 مش متحط على السيرفر' : 'مفتاح Gemini مش متحط على السيرفر'), 503);
       const text = str(b.text, 600).trim() || 'دخل أحمد الغرفة وقال بصوت هادي: «صباح الخير يا سلمى». ابتسمت سلمى وردت: «صباح النور يا أستاذ أحمد». ثم جرى الصغير نحوهما وقال بفرحة: «بابا، بابا، شوف الرسمة!»';
-      const o = await speakPart(env, prov, text, conf), secs = audioSecs(o.wav);
-      await ttsBump(env, prov, { reqs: o.calls || 1, chars: o.chars, secs, cost: prov === 'azure' ? o.chars * conf.az.price / 1e6 : prov === 'edge' ? 0 : ttsCost(o.chars, secs, conf) });
-      return audioResp(o.wav, false, o.mime);
+      const o = await speakPart(env, prov, text, conf), secs = Math.max(0, o.wav.length - 44) / 48000;
+      await ttsBump(env, prov, { reqs: o.calls || 1, chars: o.chars, secs, cost: prov === 'azure' ? o.chars * conf.az.price / 1e6 : ttsCost(o.chars, secs, conf) });
+      return audioResp(o.wav, false);
     }
     if (path === '/api/admin/tts/voices' && m === 'GET') {
-      const prov = normProv(url.searchParams.get('prov')), conf = await getTtsConf(env), gkey = prov === 'gemini2' ? env.GEMINI_API_KEY_2 : env.GEMINI_API_KEY;
-      if (prov === 'edge') return json({ ok: true, voices: Object.values(conf.az.voices).map((v) => v.v).filter((x, i, a) => a.indexOf(x) === i).map((n) => ({ name: n, lang: n.slice(0, 5), gender: '' })) });
+      const prov = normProv(url.searchParams.get('prov')), conf = await getTtsConf(env), gkey = gemKey(env, prov);
       if (prov === 'azure') {
         if (!env.AZURE_SPEECH_KEY || !azRegion(env, conf)) return fail('مفتاح Azure أو المنطقة (Region) ناقصين', 503);
         const r = await fetch('https://' + azRegion(env, conf) + '.tts.speech.microsoft.com/cognitiveservices/voices/list', { headers: { 'Ocp-Apim-Subscription-Key': env.AZURE_SPEECH_KEY } });
