@@ -479,14 +479,15 @@ async function edgeGec() { // توكن التحقق: SHA256 لـ (الوقت ب�
 }
 function edgeSsml(runs, conf, plain) {
   const v = conf.az.voices;
-  return '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="ar-EG">' + runs.map((r) => { const o = v[r.role] || v.narrator; const t = xmlEsc(r.text); return '<voice name="' + xmlEsc(o.v) + '">' + (plain ? t : '<prosody rate="' + o.rate + '" pitch="' + o.pitch + '">' + t + '</prosody>') + '</voice>'; }).join('') + '</speak>';
+  const longName = (n) => { const m = /^([a-z]{2,3})-([A-Z]{2,4})-(.+Neural)$/.exec(n); return m ? 'Microsoft Server Speech Text to Speech Voice (' + m[1] + '-' + m[2] + ', ' + m[3] + ')' : n; };
+  return '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="ar-EG">' + runs.map((r) => { const o = v[r.role] || v.narrator; const t = xmlEsc(r.text); return '<voice name="' + xmlEsc(longName(o.v)) + '">' + (plain ? t : '<prosody rate="' + o.rate + '" pitch="' + o.pitch + '">' + t + '</prosody>') + '</voice>'; }).join('') + '</speak>';
 }
 const concatBytes = (list) => { let n = 0; list.forEach((b) => (n += b.length)); const o = new Uint8Array(n); let k = 0; list.forEach((b) => { o.set(b, k); k += b.length; }); return o; };
 async function edgeRequest(env, ssml, conf) { // بيرجّع MP3 (Uint8Array)
-  const ts = new Date().toUTCString().replace('GMT', 'GMT+0000 (Coordinated Universal Time)'), rid = crypto.randomUUID().replace(/-/g, '');
+  const ts = new Date().toString().replace(/GMT.*$/, '') + 'GMT+0000 (Coordinated Universal Time)', rid = crypto.randomUUID().replace(/-/g, '');
   const ver = conf.ed.ver, url = 'https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=' + EDGE_TOKEN + '&Sec-MS-GEC=' + (await edgeGec()) + '&Sec-MS-GEC-Version=1-' + ver + '&ConnectionId=' + crypto.randomUUID().replace(/-/g, '');
-  const resp = await fetch(url, { headers: { Upgrade: 'websocket', Origin: 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + ver.split('.')[0] + '.0.0.0 Safari/537.36 Edg/' + ver, Pragma: 'no-cache', 'Cache-Control': 'no-cache' } });
-  const ws = resp.webSocket; if (!ws) { const e = new Error('edge_' + (resp.status || 'nows')); e.code = resp.status === 429 ? 429 : 502; throw e; }
+  const resp = await fetch(url, { headers: { Upgrade: 'websocket', Origin: 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + ver.split('.')[0] + '.0.0.0 Safari/537.36 Edg/' + ver, Pragma: 'no-cache', 'Cache-Control': 'no-cache', 'Accept-Language': 'en-US,en;q=0.9', Cookie: 'muid=' + [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('').toUpperCase() + ';' } });
+  const ws = resp.webSocket; if (!ws) { let bt = ''; try { bt = (await resp.text()).replace(/\s+/g, ' ').slice(0, 50); } catch (e) {} const e = new Error('edge_' + (resp.status || 'nows') + (bt ? ' ' + bt : '')); e.code = resp.status === 429 ? 429 : 502; throw e; }
   ws.accept();
   return await new Promise((resolve, reject) => {
     const chunks = []; let done = false; const dec = new TextDecoder();
@@ -656,6 +657,7 @@ async function ttsStats(env) {
       o.freeMin = fm; o.freeUsedPct = freeSecs ? Math.min(999, Math.round(today.secs / freeSecs * 100)) : null; o.extraCostToday = freeSecs ? (extraSecs * 25 * pr.outP) / 1e6 : null;
       o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: ttsCost(remChars, remSecs, conf), days: cap ? Math.ceil(remSecs / cap) : null };
     }
+    const le = await env.DB.prepare("SELECT err FROM tts_ch WHERE prov=? AND err!='' ORDER BY updated DESC LIMIT 1").bind(prov).first(); o.lastErr = le ? le.err : '';
     out.prov[prov] = o;
   }
   return out;
