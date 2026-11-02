@@ -81,11 +81,11 @@ const userOut = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, 
 let migrated = false;
 async function ensureSchema(env) {
   if (migrated) return;
-  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio'], ['users', 'links'], ['novels', 'hidden'], ['users', 'payout']];
+  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio'], ['users', 'links'], ['novels', 'hidden'], ['users', 'payout'], ['users', 'points']];
   for (const [t, c] of need) {
     try { await env.DB.prepare(`SELECT ${c} FROM ${t} LIMIT 1`).first(); }
     catch (e) {
-      const def = (c === 'locked' || c === 'premium_until' || c === 'hidden') ? 'INTEGER NOT NULL DEFAULT 0' : (c === 'avatar' || c === 'bio' || c === 'payout') ? "TEXT NOT NULL DEFAULT ''" : "TEXT NOT NULL DEFAULT '{}'";
+      const def = c === 'points' ? 'REAL NOT NULL DEFAULT 0' : (c === 'locked' || c === 'premium_until' || c === 'hidden') ? 'INTEGER NOT NULL DEFAULT 0' : (c === 'avatar' || c === 'bio' || c === 'payout') ? "TEXT NOT NULL DEFAULT ''" : "TEXT NOT NULL DEFAULT '{}'";
       await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`).run();
     }
   }
@@ -103,6 +103,11 @@ async function ensureSchema(env) {
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_tts_ch_key ON tts_ch(nid, idx)',
     'CREATE INDEX IF NOT EXISTS idx_tts_ch_q ON tts_ch(status, ord)',
     'CREATE TABLE IF NOT EXISTS tts_use (day TEXT NOT NULL, prov TEXT NOT NULL, reqs INTEGER NOT NULL DEFAULT 0, chars INTEGER NOT NULL DEFAULT 0, secs REAL NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, fails INTEGER NOT NULL DEFAULT 0, limited INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, prov))',
+    "CREATE TABLE IF NOT EXISTS contest_weeks (week TEXT PRIMARY KEY, questions TEXT NOT NULL DEFAULT '[]', prize REAL NOT NULL DEFAULT 0, winner_id INTEGER NOT NULL DEFAULT 0, winner_answer INTEGER NOT NULL DEFAULT 0, picked_at INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS contest_answers (id INTEGER PRIMARY KEY AUTOINCREMENT, week TEXT NOT NULL, user_id INTEGER NOT NULL, answers TEXT NOT NULL DEFAULT '[]', ts INTEGER NOT NULL DEFAULT 0)",
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_contest_ans ON contest_answers(week, user_id)',
+    'CREATE TABLE IF NOT EXISTS pts_votes (voter INTEGER NOT NULL, nid TEXT NOT NULL, ch INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (voter, nid, ch))',
+    "CREATE TABLE IF NOT EXISTS pts_draws (week TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', points REAL NOT NULL DEFAULT 0, prize REAL NOT NULL DEFAULT 0, ts INTEGER NOT NULL DEFAULT 0)",
     'CREATE TABLE IF NOT EXISTS purchases (user_id INTEGER NOT NULL, nid TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (user_id, nid))',
     "CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, nid TEXT NOT NULL, ntitle TEXT NOT NULL DEFAULT '', author_id INTEGER NOT NULL DEFAULT 0, price REAL NOT NULL DEFAULT 0, share REAL NOT NULL DEFAULT 0, method TEXT NOT NULL DEFAULT '', sender TEXT NOT NULL DEFAULT '', proof TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', reason TEXT NOT NULL DEFAULT '', paid_out INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, decided_at INTEGER NOT NULL DEFAULT 0)",
     'CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, created_at)',
@@ -499,7 +504,9 @@ async function ttsAlertAdmins(env, title, text, prov = 'gemini') {
 const TTS_VER = 3;
 async function ttsMigrate(env) {
   const v = await getSetting(env, 'tts_ver'); if (v.v >= TTS_VER) return true;
-  await setSetting(env, 'tts_ver', { v: TTS_VER }); return true;
+  await setSetting(env, 'tts_ver', { v: TTS_VER });
+  const mk = await getSetting(env, 'tts_mk'); if (!mk.v) { await env.DB.prepare("UPDATE tts_ch SET sig='' WHERE status!='done'").run(); await setSetting(env, 'tts_mk', { v: 1 }); } // الفصول اللي لسه ما اتحوّلتش تتبعت تاني بعلامات الحوار
+  return true;
 }
 async function ttsWipeNovel(env, nid) { // مسح الصوت المتخزّن لرواية
   const { results } = await env.DB.prepare('SELECT id,nparts FROM tts_ch WHERE nid=?').bind(nid).all();
@@ -583,6 +590,52 @@ async function ttsStats(env) {
   return out;
 }
 
+/* ---------- المسابقة الأسبوعية + نقاط الكتّاب + قرعة نقاط الفوز ---------- */
+const DAYMS = 86400000, PT_PER_VOTE = 0.1;
+function weekStart(t = Date.now()) { // أول يوم في الأسبوع = السبت (بتوقيت مصر تقريبًا)
+  const d = new Date(t + 2 * 3600000), back = (d.getUTCDay() + 1) % 7;
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - back * DAYMS).toISOString().slice(0, 10);
+}
+const weekEndMs = (w) => Date.parse(w + 'T00:00:00Z') - 2 * 3600000 + 7 * DAYMS;
+const cleanQs = (a) => (Array.isArray(a) ? a : []).map((q) => str(q, 400).trim()).filter(Boolean).slice(0, 5);
+const winnerOut = (r) => (r ? { id: r.winner_id, name: r.name, avatar: r.avatar || '', prize: r.prize, week: r.week, pickedAt: r.picked_at } : null);
+async function contestPublic(env, me) {
+  const cur = weekStart(), row = await env.DB.prepare('SELECT * FROM contest_weeks WHERE week=?').bind(cur).first();
+  const qs = row ? parseJson(row.questions) : [], questions = Array.isArray(qs) ? qs : [];
+  const { results } = await env.DB.prepare('SELECT w.week,w.prize,w.winner_id,w.picked_at,u.name,u.avatar FROM contest_weeks w JOIN users u ON u.id=w.winner_id WHERE w.winner_id>0 ORDER BY w.week DESC LIMIT 8').all();
+  let mine = null;
+  if (me) { const a = await env.DB.prepare('SELECT answers,ts FROM contest_answers WHERE week=? AND user_id=?').bind(cur, me.id).first(); if (a) mine = { answers: parseJson(a.answers), ts: a.ts }; }
+  const latest = results[0] || null;
+  return { week: cur, endsAt: weekEndMs(cur), questions, prize: row ? row.prize : 0, closed: !!(row && row.winner_id > 0), answered: !!mine, mine,
+    winner: winnerOut(latest), thisWeekWinner: !!(latest && latest.week === cur), history: results.slice(1).map(winnerOut) };
+}
+async function pointsPublic(env, me) {
+  const cur = weekStart(), pts = await getSetting(env, 'pts');
+  const { results: top } = await env.DB.prepare("SELECT id,name,avatar,points FROM users WHERE role!='admin' AND points>0 ORDER BY points DESC,id ASC LIMIT 10").all();
+  const { results: draws } = await env.DB.prepare('SELECT week,user_id AS winner_id,name,avatar,points,prize,ts AS picked_at FROM pts_draws WHERE user_id>0 ORDER BY week DESC LIMIT 8').all();
+  const d = draws[0] || null;
+  return { week: cur, prize: pts.prize || 0, endsAt: weekEndMs(cur), top: top.map((u) => ({ id: u.id, name: u.name, avatar: u.avatar || '', points: u.points })), latest: d, thisWeek: !!(d && d.week === cur), history: draws.slice(1),
+    me: me ? { points: (await env.DB.prepare('SELECT points FROM users WHERE id=?').bind(me.id).first() || {}).points || 0 } : null };
+}
+const randInt = (n) => { const a = new Uint32Array(1); crypto.getRandomValues(a); return a[0] % n; };
+async function ptsDraw(env, force) { // بيختار واحد عشوائي من أعلى 10 حسابات نقاط
+  const pts = await getSetting(env, 'pts'), cur = weekStart();
+  if (!force && !(pts.prize > 0)) return { ok: false, idle: 'no_prize' };
+  const { results } = await env.DB.prepare("SELECT id,name,avatar,points FROM users WHERE role!='admin' AND points>0 ORDER BY points DESC,id ASC LIMIT 10").all();
+  if (!results.length) { if (!force) await env.DB.prepare('INSERT OR IGNORE INTO pts_draws (week,user_id,name,avatar,points,prize,ts) VALUES (?,?,?,?,?,?,?)').bind(cur, 0, '', '', 0, pts.prize || 0, Date.now()).run(); return { ok: false, idle: 'no_candidates' }; }
+  const w = results[randInt(results.length)];
+  await env.DB.prepare('INSERT OR REPLACE INTO pts_draws (week,user_id,name,avatar,points,prize,ts) VALUES (?,?,?,?,?,?,?)').bind(cur, w.id, w.name, w.avatar || '', w.points, pts.prize || 0, Date.now()).run();
+  await notifyUser(env, w.id, '🏆 مبروك! فزت في نقاط الفوز', 'اتختارت الأسبوع ده من أعلى 10 كتّاب بالنقاط وفزت بـ ' + (pts.prize || 0) + ' جنيه. الإدارة هتتواصل معاك.', 'pay');
+  return { ok: true, winner: { id: w.id, name: w.name }, week: cur };
+}
+async function ptsTick(env) { // من الـ Cron: قرعة تلقائية أول كل أسبوع (بعد أول أسبوع من التفعيل)
+  const pts = await getSetting(env, 'pts'), cur = weekStart();
+  if (!pts.start) { await setSetting(env, 'pts', { ...pts, start: cur }); return; }
+  if (cur <= pts.start) return;
+  if (await env.DB.prepare('SELECT 1 FROM pts_draws WHERE week=?').bind(cur).first()) return;
+  await ptsDraw(env, false);
+}
+
 /* ---------- إشعارات الموبايل (Firebase Cloud Messaging) ---------- */
 async function fcmAccessToken(sa) {
   const now = Math.floor(Date.now() / 1000);
@@ -615,7 +668,7 @@ export default {
   },
   // كل دقيقة: يكمّل تحويل الفصول في الطابور (بحد يومي)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureSchema(env); if (await ttsMigrate(env)) await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureSchema(env); try { await ptsTick(env); } catch (e) {} if (await ttsMigrate(env)) await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } catch (e) {} })());
   }
 };
 
@@ -716,16 +769,16 @@ async function route(request, env) {
     return json({ ok: true });
   }
   if (path === '/api/authors' && m === 'GET') {
-    const { results: us } = await env.DB.prepare("SELECT id,name,role,avatar,bio,links,created_at FROM users WHERE role='admin' OR id IN (SELECT user_id FROM novels WHERE is_live=1 AND hidden=0) ORDER BY id").all();
+    const { results: us } = await env.DB.prepare("SELECT id,name,role,avatar,bio,links,created_at,points FROM users WHERE role='admin' OR id IN (SELECT user_id FROM novels WHERE is_live=1 AND hidden=0) ORDER BY id").all();
     const total = (await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first()).n;
     const { results: fc } = await env.DB.prepare('SELECT author_id, COUNT(*) AS n FROM follows GROUP BY author_id').all();
     const fm = {}; for (const r of fc) fm[r.author_id] = r.n;
-    return json({ authors: us.map((u) => ({ id: u.id, name: u.name, avatar: u.avatar, bio: u.bio, links: linksOf(u.links), isAdmin: u.role === 'admin', joinedAt: u.created_at, followers: u.role === 'admin' ? Math.max(0, total - 1) : (fm[u.id] || 0) })) }, 200, { 'Cache-Control': 'public, max-age=30' });
+    return json({ authors: us.map((u) => ({ id: u.id, name: u.name, avatar: u.avatar, bio: u.bio, links: linksOf(u.links), isAdmin: u.role === 'admin', joinedAt: u.created_at, points: u.points || 0, followers: u.role === 'admin' ? Math.max(0, total - 1) : (fm[u.id] || 0) })) }, 200, { 'Cache-Control': 'public, max-age=30' });
   }
   if ((g = /^\/api\/authors\/(\d+|admin)$/.exec(path)) && m === 'GET') {
     let aid;
     if (g[1] === 'admin') { const a = await env.DB.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").first(); if (!a) return fail('غير موجود', 404); aid = a.id; } else aid = +g[1];
-    const a = await env.DB.prepare('SELECT id,name,role,avatar,bio,links,created_at FROM users WHERE id=?').bind(aid).first();
+    const a = await env.DB.prepare('SELECT id,name,role,avatar,bio,links,created_at,points FROM users WHERE id=?').bind(aid).first();
     if (!a) return fail('الكاتب غير موجود', 404);
     const isAdm = a.role === 'admin';
     const followers = isAdm ? Math.max(0, (await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first()).n - 1) : (await env.DB.prepare('SELECT COUNT(*) AS n FROM follows WHERE author_id=?').bind(aid).first()).n;
@@ -733,15 +786,34 @@ async function route(request, env) {
     let me = null, following = false;
     if (request.headers.get('Authorization')) { me = await authUser(env, request); }
     if (me) following = isAdm ? me.id !== aid : !!(await env.DB.prepare('SELECT 1 FROM follows WHERE follower_id=? AND author_id=?').bind(me.id, aid).first());
-    return json({ author: { id: a.id, name: a.name, bio: a.bio, links: linksOf(a.links), avatar: a.avatar, isAdmin: isAdm, joinedAt: a.created_at, followers, following, self: !!(me && me.id === aid),
+    return json({ author: { id: a.id, name: a.name, bio: a.bio, links: linksOf(a.links), avatar: a.avatar, isAdmin: isAdm, joinedAt: a.created_at, points: a.points || 0, followers, following, self: !!(me && me.id === aid),
       novels: results.map((r) => { const x = extraOf(r.l_extra); return { id: r.id, title: r.l_title, author: r.l_author || a.name, genre: r.l_genre, cover: r.l_cover, grad: x.grad, icon: x.icon, locked: !!(x.lockAll && x.password), publishedAt: r.published_at }; }) } }, 200, { 'Cache-Control': 'private, no-store' });
   }
   if (path === '/api/premium-info' && m === 'GET') return json({ info: await getPremiumInfo(env) }, 200, { 'Cache-Control': 'public, max-age=30' });
+
+  /* ----- المسابقات (عام) ----- */
+  if (path === '/api/contest' && m === 'GET') { const me = request.headers.get('Authorization') ? await authUser(env, request) : null; return json(await contestPublic(env, me), 200, { 'Cache-Control': 'no-store' }); }
+  if (path === '/api/points' && m === 'GET') { const me = request.headers.get('Authorization') ? await authUser(env, request) : null; return json(await pointsPublic(env, me), 200, { 'Cache-Control': 'no-store' }); }
 
   /* ----- كل ما بعد كده يحتاج تسجيل دخول ----- */
   const user = await authUser(env, request);
   if (!user) return fail('سجّل الدخول الأول', 401);
 
+  if (path === '/api/contest/answer' && m === 'POST') {
+    const b = await body(request, 6000), cur = weekStart(), row = await env.DB.prepare('SELECT * FROM contest_weeks WHERE week=?').bind(cur).first();
+    const qs = row ? parseJson(row.questions) : [];
+    if (!Array.isArray(qs) || !qs.length) return fail('أسئلة الأسبوع لسه ما نزلتش');
+    if (row.winner_id > 0) return fail('المسابقة دي اتقفلت واتختار الفائز');
+    if (!Array.isArray(b.answers)) return fail('اكتب إجاباتك');
+    const answers = qs.map((_, i) => str(b.answers[i], 700).trim());
+    if (answers.some((a) => a.length < 1)) return fail('جاوب على كل الأسئلة قبل الإرسال');
+    if (await env.DB.prepare('SELECT 1 FROM contest_answers WHERE week=? AND user_id=?').bind(cur, user.id).first()) return fail('إنت جاوبت الأسبوع ده قبل كده');
+    if (await tooMany(env, 'cans:' + user.id, 20, 3600000)) return fail('كتير أوي، استنى شوية');
+    await noteAttempt(env, 'cans:' + user.id);
+    await env.DB.prepare('INSERT INTO contest_answers (week,user_id,answers,ts) VALUES (?,?,?,?)').bind(cur, user.id, JSON.stringify(answers), Date.now()).run();
+    return json({ ok: true });
+  }
+  if (path === '/api/me/points' && m === 'GET') return json({ points: (await env.DB.prepare('SELECT points FROM users WHERE id=?').bind(user.id).first() || {}).points || 0 });
   if (path === '/api/me' && m === 'GET') return json({ user: userOut(user) });
   if (path === '/api/me' && m === 'PUT') {
     const b = await body(request), name = b.name === undefined ? user.name : str(b.name, 40).trim();
@@ -816,6 +888,11 @@ async function route(request, env) {
       if (!target) { const adm = await env.DB.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").first(); if (adm) target = adm.id; }
     }
     if (!target || target === user.id) return json({ ok: true, skipped: true });
+    if (kind === 'rating') { // كل تصويت لفصل = 0.1 نقطة للكاتب (مرة واحدة لكل قارئ لكل فصل)
+      const ch = Number.isInteger(+b.chapter) ? Math.max(-1, Math.min(9999, +b.chapter)) : -1;
+      const ins = await env.DB.prepare('INSERT OR IGNORE INTO pts_votes (voter,nid,ch,ts) VALUES (?,?,?,?)').bind(user.id, ref, ch, Date.now()).run();
+      if (ins && ins.meta && ins.meta.changes) await env.DB.prepare('UPDATE users SET points=ROUND(points+?,1) WHERE id=?').bind(PT_PER_VOTE, target).run();
+    }
     const title = str(b.title, 120).trim(), stars = Math.max(1, Math.min(5, +b.stars || 5));
     const snip = str(b.snippet, 400).trim().slice(0, 120);
     const head = kind === 'rating' ? '⭐ تقييم جديد على روايتك' : '💬 تعليق جديد على روايتك';
@@ -1100,7 +1177,7 @@ async function route(request, env) {
       const raw = await getSetting(env, 'tts'); await setSetting(env, 'tts', { ...raw, novelProv: { ...conf.novelProv, [nid]: prov } });
       if (cur && (cur.prov !== prov || b.redo)) {
         await ttsWipeNovel(env, nid);
-        await env.DB.prepare("UPDATE tts_ch SET prov=?,done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=? WHERE nid=?").bind(prov, Date.now(), nid).run();
+        await env.DB.prepare("UPDATE tts_ch SET prov=?,sig='',done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=? WHERE nid=?").bind(prov, Date.now(), nid).run();
       }
       return json({ ok: true, ...(await ttsStats(env)) });
     }
@@ -1135,6 +1212,40 @@ async function route(request, env) {
       const list = j && Array.isArray(j.voices) ? j.voices.map((v) => ({ name: v.name || v.voiceName || v.id, lang: v.languageCodes || v.language || v.locale || '', gender: v.gender || '' })) : [];
       return json({ ok: r.ok, status: r.status, voices: list, raw: list.length ? undefined : t.slice(0, 600) });
     }
+    /* ----- المسابقة (أدمن) ----- */
+    if (path === '/api/admin/contest' && m === 'GET') {
+      const wk = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('week') || '') ? url.searchParams.get('week') : weekStart();
+      const row = await env.DB.prepare('SELECT * FROM contest_weeks WHERE week=?').bind(wk).first();
+      const { results: ans } = await env.DB.prepare('SELECT a.id,a.user_id,a.answers,a.ts,u.name,u.email,u.avatar FROM contest_answers a JOIN users u ON u.id=a.user_id WHERE a.week=? ORDER BY a.ts ASC LIMIT 1000').bind(wk).all();
+      const { results: weeks } = await env.DB.prepare('SELECT w.week,w.prize,w.winner_id,u.name AS wname,(SELECT COUNT(*) FROM contest_answers c WHERE c.week=w.week) AS n FROM contest_weeks w LEFT JOIN users u ON u.id=w.winner_id ORDER BY w.week DESC LIMIT 20').all();
+      return json({ week: wk, current: weekStart(), questions: row ? parseJson(row.questions) : [], prize: row ? row.prize : 0, winnerId: row ? row.winner_id : 0, winnerAnswer: row ? row.winner_answer : 0,
+        count: ans.length, answers: ans.map((a) => ({ id: a.id, userId: a.user_id, name: a.name, email: a.email, avatar: a.avatar || '', answers: parseJson(a.answers), ts: a.ts })), weeks });
+    }
+    if (path === '/api/admin/contest' && m === 'PUT') {
+      const b = await body(request, 6000), wk = /^\d{4}-\d{2}-\d{2}$/.test(b.week || '') ? b.week : weekStart(), qs = cleanQs(b.questions), prize = Math.max(0, Math.min(1e7, Number(b.prize) || 0));
+      await env.DB.prepare('INSERT INTO contest_weeks (week,questions,prize,updated) VALUES (?,?,?,?) ON CONFLICT(week) DO UPDATE SET questions=excluded.questions,prize=excluded.prize,updated=excluded.updated').bind(wk, JSON.stringify(qs), prize, Date.now()).run();
+      return json({ ok: true, week: wk });
+    }
+    if (path === '/api/admin/contest/winner' && m === 'POST') {
+      const b = await body(request, 600), a = await env.DB.prepare('SELECT id,week,user_id FROM contest_answers WHERE id=?').bind(+b.answerId || 0).first();
+      if (!a) return fail('الإجابة مش موجودة', 404);
+      const row = await env.DB.prepare('SELECT prize FROM contest_weeks WHERE week=?').bind(a.week).first(); if (!row) return fail('المسابقة مش موجودة', 404);
+      await env.DB.prepare('UPDATE contest_weeks SET winner_id=?,winner_answer=?,picked_at=? WHERE week=?').bind(a.user_id, a.id, Date.now(), a.week).run();
+      await notifyUser(env, a.user_id, '🏆 مبروك! فزت في مسابقة الأسبوع', 'اتختارت إجابتك الفايزة وجايزتك ' + row.prize + ' جنيه. الإدارة هتتواصل معاك.', 'pay');
+      return json({ ok: true });
+    }
+    if (path === '/api/admin/contest/unwin' && m === 'POST') {
+      const b = await body(request, 300); if (!/^\d{4}-\d{2}-\d{2}$/.test(b.week || '')) return fail('طلب غير صحيح');
+      await env.DB.prepare('UPDATE contest_weeks SET winner_id=0,winner_answer=0,picked_at=0 WHERE week=?').bind(b.week).run(); return json({ ok: true });
+    }
+    /* ----- نقاط الفوز (أدمن) ----- */
+    if (path === '/api/admin/points' && m === 'GET') {
+      const pts = await getSetting(env, 'pts'), { results: top } = await env.DB.prepare("SELECT id,name,email,avatar,points FROM users WHERE role!='admin' AND points>0 ORDER BY points DESC,id ASC LIMIT 10").all();
+      const { results: draws } = await env.DB.prepare('SELECT week,user_id,name,points,prize,ts FROM pts_draws ORDER BY week DESC LIMIT 12').all();
+      return json({ prize: pts.prize || 0, start: pts.start || '', week: weekStart(), nextDraw: weekEndMs(weekStart()), top, draws });
+    }
+    if (path === '/api/admin/points' && m === 'PUT') { const b = await body(request, 300), pts = await getSetting(env, 'pts'); await setSetting(env, 'pts', { ...pts, prize: Math.max(0, Math.min(1e7, Number(b.prize) || 0)) }); return json({ ok: true }); }
+    if (path === '/api/admin/points/draw' && m === 'POST') return json({ ok: true, ...(await ptsDraw(env, true)) });
     if (path === '/api/admin/nprices' && m === 'PUT') {
       const b = await body(request, 300000); await setSetting(env, 'nprices', { prices: cleanNovelPrices(b.prices) });
       return json({ ok: true, info: await getPremiumInfo(env) });
