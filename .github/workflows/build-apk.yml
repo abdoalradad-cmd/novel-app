@@ -11,6 +11,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -104,8 +106,24 @@ jobs:
           fi
           echo "OK: signed with the stable RadPad key"
 
+      - name: Name the APK (RadPad)
+        run: |
+          V=$(tr -d '[:space:]' < APP_VERSION)
+          mkdir -p out
+          cp android/app/build/outputs/apk/debug/app-debug.apk "out/RadPad-v${V}-${{ github.run_number }}.apk"
+          ls -la out
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: alradad-novels-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: RadPad
+          path: out/*.apk
+
+      - name: Publish direct download (Releases, no zip)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(tr -d '[:space:]' < APP_VERSION)
+          F=$(ls out/*.apk | head -1)
+          gh release create "build-${{ github.run_number }}" "$F" --target "${{ github.sha }}" --title "RadPad v${V} (build ${{ github.run_number }})" --notes "حمّل ملف الـ APK مباشرة وثبّته." --latest
