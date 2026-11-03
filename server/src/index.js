@@ -478,11 +478,12 @@ function applyDict(runs, conf) { // قاموس النطق: كلمة=كلمة ب�
 async function geminiPart(env, text, conf, ctx) { // جزء واحد: أدوار متعددة (حد أقصى متكلمين اثنين في الطلب)
   const runs = applyDict(conf.multi ? await smartRoles(env, text, conf, ctx) : [{ role: 'narrator', text: stripMarks(text) }], conf), groups = []; let cur = null;
   for (const r of runs) { if (!cur || (!cur.roles.has(r.role) && cur.roles.size >= (conf.mm ? 2 : 1))) { cur = { roles: new Set(), items: [] }; groups.push(cur); } cur.roles.add(r.role); cur.items.push(r); }
-  const wavs = []; let chars = 0;
-  for (const g of groups) {
-    const roles = [...g.roles], t = g.items.map((x) => x.text).join(' '); chars += t.length;
-    wavs.push(roles.length === 1 ? await geminiSpeak(env, t, conf.gv[roles[0]], conf, roleStyle(conf, roles[0])) : await geminiMulti(env, roles[0], roles[1], g.items, conf));
-  }
+  const wavs = new Array(groups.length); let chars = 0, nxt = 0;
+  groups.forEach((g) => { chars += g.items.map((x) => x.text).join(' ').length; });
+  const one = async (i) => { const g = groups[i], roles = [...g.roles], t = g.items.map((x) => x.text).join(' ');
+    wavs[i] = roles.length === 1 ? await geminiSpeak(env, t, conf.gv[roles[0]], conf, roleStyle(conf, roles[0])) : await geminiMulti(env, roles[0], roles[1], g.items, conf); };
+  // الأجزاء الصغيرة (الأدوار) بتتحوّل بالتوازي (3 مع بعض) علشان الجزء يخلص قبل ما الوقت يخلص
+  await Promise.all(Array.from({ length: Math.min(3, groups.length) }, async () => { while (nxt < groups.length) { const i = nxt++; await one(i); } }));
   const wav = joinWavs(wavs); return { wav, chars, calls: groups.length };
 }
 const xmlEsc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
