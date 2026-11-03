@@ -301,7 +301,7 @@ async function getTtsConf(env) {
   const np = {}; Object.keys(x.novelProv || {}).slice(0, 2000).forEach((k) => { if (PROVS.includes(x.novelProv[k])) np[k] = x.novelProv[k]; });
   return { model: x.model || TTS_DEFAULT.model, legacyModel: x.legacyModel || TTS_DEFAULT.legacyModel, style: x.style || TTS_DEFAULT.style, gv,
     concurrency: n(x.concurrency, TTS_DEFAULT.concurrency, 1, 4), dailyMin: n(x.dailyMin, TTS_DEFAULT.dailyMin, 0, 100000), freeMin: n(x.freeMin, 0, 0, 100000), priceIn: n(x.priceIn, 0, 0, 1000), priceOut: n(x.priceOut, 0, 0, 1000),
-    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false,
+    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false, smart: x.smart !== false, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
     g2: { dailyMin: n((x.g2 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g2 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g2 || {}).concurrency, 2, 1, 4) },
     g3: { dailyMin: n((x.g3 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g3 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g3 || {}).concurrency, 2, 1, 4) },
     az: { region: /^[a-z0-9-]{3,30}$/.test(String(xa.region || '')) ? String(xa.region) : '', dailyMin: n(xa.dailyMin, 30, 0, 100000), freeChars: n(xa.freeChars, 500000, 0, 1e9), price: n(xa.price, 15, 0, 1000), concurrency: n(xa.concurrency, 3, 1, 8), voices } };
@@ -445,8 +445,34 @@ async function geminiMulti(env, roleA, roleB, items, conf) { // سطرين مت�
   const b = findAudioB64(await r.json()); if (!b) { const e = new Error('no_audio'); e.code = 502; throw e; }
   return toWav(b);
 }
-async function geminiPart(env, text, conf) { // جزء واحد: أدوار متعددة (حد أقصى متكلمين اثنين في الطلب)
-  const runs = conf.multi ? segmentRoles(text) : [{ role: 'narrator', text: stripMarks(text) }], groups = []; let cur = null;
+/* ---- تمييز المتكلم بذكاء: نموذج جوجل النصي بيقرا الفقرة (ومعاها اللي قبلها) ويحدد لكل جزء مين بيتكلم: راجل / ست / ولد / بنت ---- */
+const ROLE_ENUM = ['narrator', 'man', 'woman', 'boy', 'girl'];
+async function smartRoles(env, text, conf, ctx) {
+  const base = segmentRoles(text), key = env.GEMINI_API_KEY;
+  if (!conf.smart || !key || !base.some((r) => r.role !== 'narrator')) return base;
+  try {
+    const list = base.map((r, i) => '[' + i + '] ' + r.text).join('\n');
+    const prompt = 'You are preparing an Arabic (Egyptian) novel for an audiobook with different voices. Below is the text before the excerpt (context only), then the excerpt split into numbered segments in order. '
+      + 'For EACH numbered segment return who speaks it: "narrator" for narration/description (not spoken by a character), or "man", "woman", "boy", "girl" for a character\'s spoken words. '
+      + 'Decide the speaker\'s gender from the clues: names, pronouns, verb forms (قال/قالت, رد/ردت), words like هي/هو/أمه/أبوه/زوجته/زوجها, who is being addressed, and the flow of the conversation (people usually alternate). '
+      + 'Keep each character consistent across the excerpt and the context. A speech tag like "قالت سلمى" belongs to narrator but tells you the speaker of the neighbouring spoken segment. Use boy/girl only for clearly young children. '
+      + 'Return ONLY a JSON array of exactly ' + base.length + ' strings, one per segment.\n\nCONTEXT (before):\n' + String(ctx || '').slice(-600) + '\n\nEXCERPT:\n' + list;
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.annModel + ':generateContent', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: { type: 'ARRAY', items: { type: 'STRING', enum: ROLE_ENUM } } } }) });
+    if (!r.ok) return base;
+    const j = await r.json(), t = (((j.candidates || [])[0] || {}).content || {}).parts; const arr = JSON.parse((t || []).map((x) => x.text || '').join(''));
+    if (!Array.isArray(arr) || arr.length !== base.length || !arr.every((x) => ROLE_ENUM.includes(x))) return base;
+    const out = []; base.forEach((b, i) => { const role = base[i].role === 'narrator' ? 'narrator' : (arr[i] === 'narrator' ? base[i].role : arr[i]); const l = out[out.length - 1]; if (l && l.role === role) l.text += ' ' + b.text; else out.push({ role, text: b.text }); });
+    return out;
+  } catch (e) { return base; }
+}
+function applyDict(runs, conf) { // قاموس النطق: كلمة=كلمة بالتشكيل
+  const pairs = String(conf.dict || '').split('\n').map((l) => { const k = l.indexOf('='); return k > 0 ? [l.slice(0, k).trim(), l.slice(k + 1).trim()] : null; }).filter((x) => x && x[0] && x[1]).sort((a, b) => b[0].length - a[0].length);
+  if (!pairs.length) return runs;
+  return runs.map((r) => { let t = r.text; for (const [a, b] of pairs) t = t.split(a).join(b); return { role: r.role, text: t }; });
+}
+async function geminiPart(env, text, conf, ctx) { // جزء واحد: أدوار متعددة (حد أقصى متكلمين اثنين في الطلب)
+  const runs = applyDict(conf.multi ? await smartRoles(env, text, conf, ctx) : [{ role: 'narrator', text: stripMarks(text) }], conf), groups = []; let cur = null;
   for (const r of runs) { if (!cur || (!cur.roles.has(r.role) && cur.roles.size >= 2)) { cur = { roles: new Set(), items: [] }; groups.push(cur); } cur.roles.add(r.role); cur.items.push(r); }
   const wavs = []; let chars = 0;
   for (const g of groups) {
@@ -468,13 +494,14 @@ async function azureSpeakRuns(env, runs, conf) {
   if (!r.ok) { const e = new Error('azure_' + r.status); e.code = 502; throw e; }
   const b = new Uint8Array(await r.arrayBuffer()); if (b.length < 100) { const e = new Error('no_audio'); e.code = 502; throw e; } return b;
 }
-async function azurePart(env, text, conf) {
-  const runs = conf.multi ? segmentRoles(text) : [{ role: 'narrator', text: stripMarks(text) }];
+async function azurePart(env, text, conf, ctx) {
+  const runs = applyDict(conf.multi ? await smartRoles(env, text, conf, ctx) : [{ role: 'narrator', text: stripMarks(text) }], conf);
   const wav = await azureSpeakRuns(env, runs, conf); return { wav, chars: runs.reduce((a, r) => a + r.text.length, 0), calls: 1 };
 }
-const speakPart = (env, prov, text, conf) => (prov === 'azure' ? azurePart(env, text, conf) : geminiPart(gemEnv(env, prov), text, conf));
+const speakPart = (env, prov, text, conf, ctx) => (prov === 'azure' ? azurePart(env, text, conf, ctx) : geminiPart(gemEnv(env, prov), text, conf, ctx));
 const audioResp = (obj, hit) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'private, max-age=86400', 'X-Cache': hit ? 'HIT' : 'MISS' } });
 const CPS = 14; // حروف في الثانية تقريبًا (لتقدير المدة والتكلفة قبل التحويل)
+const hasMk = (t) => /[«“"]/.test(t) || /(^|\n)\s*[-–—]/.test(t);
 const hasLetters = (t) => /[؀-ۿA-Za-z0-9]/.test(t);
 // يقسّم نص الفصل لأجزاء (≤700 حرف) على حدود الفقرات/الجمل. بيرجّع [[بداية،نهاية]] بالنسبة للنص الأصلي
 function splitParts(text) {
@@ -554,7 +581,7 @@ async function ttsStep(env, opts = {}) {
     const idxs = []; for (let k = 0; k < par && done + k < parts.length && made + k < 8; k++) idxs.push(done + k);
     const res = await Promise.allSettled(idxs.map(async (p) => {
       const txt = ch.text.slice(parts[p][0], parts[p][1]).trim();
-      const o = await speakPart(env, prov, txt, conf);
+      const o = await speakPart(env, prov, txt, conf, ch.text.slice(Math.max(0, parts[p][0] - 600), parts[p][0]));
       await env.TTS_BUCKET.put('c/' + ch.id + '/' + p + '.wav', o.wav, { httpMetadata: { contentType: 'audio/wav' } });
       return { secs: Math.max(0, o.wav.length - 44) / 48000, chars: o.chars, calls: o.calls };
     }));
@@ -1161,13 +1188,13 @@ async function route(request, env) {
     }
     if (path === '/api/admin/tts' && m === 'GET') { await ttsMigrate(env); return json(await ttsStats(env)); }
     if (path === '/api/admin/tts' && m === 'PUT') {
-      const b = await body(request, 6000), cur = await getTtsConf(env), nm = (v, d) => (/^[A-Za-z0-9._-]{2,60}$/.test(String(v || '')) ? String(v) : d), nu = (v, d, lo, hi) => { const k = Number(v); return v !== '' && v != null && Number.isFinite(k) && k >= lo && k <= hi ? k : d; };
+      const b = await body(request, 12000), cur = await getTtsConf(env), nm = (v, d) => (/^[A-Za-z0-9._-]{2,60}$/.test(String(v || '')) ? String(v) : d), nu = (v, d, lo, hi) => { const k = Number(v); return v !== '' && v != null && Number.isFinite(k) && k >= lo && k <= hi ? k : d; };
       const gv = { ...cur.gv }; ROLES.forEach((r) => { const v = (b.gv || {})[r] || (r === 'narrator' ? b.voice : ''); if (v) gv[r] = nm(v, gv[r]); });
       const ba = b.az || {}, az = { region: ba.region != null ? (/^[a-z0-9-]{3,30}$/.test(String(ba.region).trim().toLowerCase()) ? String(ba.region).trim().toLowerCase() : '') : cur.az.region, dailyMin: nu(ba.dailyMin, cur.az.dailyMin, 0, 100000), freeChars: nu(ba.freeChars, cur.az.freeChars, 0, 1e9), price: nu(ba.price, cur.az.price, 0, 1000), concurrency: nu(ba.concurrency, cur.az.concurrency, 1, 8), voices: { ...cur.az.voices } };
       ROLES.forEach((r) => { const v = (ba.voices || {})[r]; if (v && typeof v === 'object') { const o = { ...cur.az.voices[r] }; if (/^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]{2,40}$/.test(String(v.v || ''))) o.v = String(v.v); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.rate || ''))) o.rate = String(v.rate); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.pitch || ''))) o.pitch = String(v.pitch); az.voices[r] = o; } });
       await setSetting(env, 'tts', { model: nm(b.model, cur.model), legacyModel: nm(b.legacyModel, cur.legacyModel), style: str(b.style, 200).trim() || cur.style, gv,
         concurrency: nu(b.concurrency, cur.concurrency, 1, 4), dailyMin: nu(b.dailyMin, cur.dailyMin, 0, 100000), freeMin: nu(b.freeMin, cur.freeMin, 0, 100000), priceIn: nu(b.priceIn, cur.priceIn, 0, 1000), priceOut: nu(b.priceOut, cur.priceOut, 0, 1000),
-        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, multi: b.multi == null ? cur.multi : !!b.multi, az,
+        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, multi: b.multi == null ? cur.multi : !!b.multi, smart: b.smart == null ? cur.smart : !!b.smart, annModel: nm(b.annModel, cur.annModel), dict: b.dict == null ? cur.dict : String(b.dict).slice(0, 3000), az,
         g2: { dailyMin: nu((b.g2 || {}).dailyMin, cur.g2.dailyMin, 0, 100000), freeMin: nu((b.g2 || {}).freeMin, cur.g2.freeMin, 0, 100000), concurrency: nu((b.g2 || {}).concurrency, cur.g2.concurrency, 1, 4) },
         g3: { dailyMin: nu((b.g3 || {}).dailyMin, cur.g3.dailyMin, 0, 100000), freeMin: nu((b.g3 || {}).freeMin, cur.g3.freeMin, 0, 100000), concurrency: nu((b.g3 || {}).concurrency, cur.g3.concurrency, 1, 4) } });
       return json({ ok: true, ...(await ttsStats(env)) });
@@ -1187,7 +1214,9 @@ async function route(request, env) {
     }
     if (path === '/api/admin/tts/known' && m === 'GET') {
       const { results } = await env.DB.prepare('SELECT nid,idx,sig FROM tts_ch').all(), sigs = {};
-      results.forEach((r) => (sigs[r.nid + '#' + r.idx] = r.sig)); return json({ sigs });
+      const { results: mkr } = await env.DB.prepare("SELECT nid,idx FROM tts_ch WHERE status='done' OR text LIKE '%«%' OR text LIKE '%' || char(34) || '%' OR text LIKE '%“%' OR text LIKE '-%' OR text LIKE '%' || char(10) || '-%' OR text LIKE '%' || char(10) || '–%' OR text LIKE '%' || char(10) || '—%'").all(), mk = {};
+      mkr.forEach((r) => (mk[r.nid + '#' + r.idx] = 1));
+      results.forEach((r) => (sigs[r.nid + '#' + r.idx] = r.sig)); return json({ sigs, mk });
     }
     if (path === '/api/admin/tts/enqueue' && m === 'POST') {
       if (!(await ttsMigrate(env))) return fail('بنمسح الصوت القديم… جرّب بعد دقيقة', 503);
@@ -1198,11 +1227,12 @@ async function route(request, env) {
         if (!nid || !(ix >= 0 && ix < 5000)) { skipped++; continue; }
         const parts = splitParts(text); if (!parts.length) { skipped++; continue; }
         const ntitle = str(it.ntitle, 120), ctitle = str(it.ctitle, 120), ord = Math.max(-1e9, Math.min(1e9, parseInt(it.ord, 10) || 0));
-        const ex = await env.DB.prepare('SELECT id,sig,prov FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
+        const ex = await env.DB.prepare('SELECT id,sig,prov,text,nparts,status FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
         const sib = await env.DB.prepare('SELECT prov FROM tts_ch WHERE nid=? LIMIT 1').bind(nid).first(), prov = conf.novelProv[nid] || (sib && sib.prov) || conf.defProv;
         if (!ex) { await env.DB.prepare('INSERT INTO tts_ch (nid,idx,ntitle,ctitle,ord,sig,text,parts,nparts,created,updated,prov) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind(nid, ix, ntitle, ctitle, ord, sig, text, JSON.stringify(parts), parts.length, now, now, prov).run(); added++; }
-        else if (ex.sig === sig) { await env.DB.prepare('UPDATE tts_ch SET ntitle=?,ctitle=? WHERE id=?').bind(ntitle, ctitle, ex.id).run(); skipped++; }
-        else { await env.DB.prepare("UPDATE tts_ch SET ntitle=?,ctitle=?,sig=?,text=?,parts=?,nparts=?,done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=?,prov=? WHERE id=?").bind(ntitle, ctitle, sig, text, JSON.stringify(parts), parts.length, now, prov, ex.id).run(); updated++; }
+        else if (ex.sig === sig && !(ex.status !== 'done' && hasMk(text) && !hasMk(ex.text))) { await env.DB.prepare('UPDATE tts_ch SET ntitle=?,ctitle=? WHERE id=?').bind(ntitle, ctitle, ex.id).run(); skipped++; }
+        else {
+          if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < ex.nparts; i++) ks.push('c/' + ex.id + '/' + i + '.wav'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); } await env.DB.prepare("UPDATE tts_ch SET ntitle=?,ctitle=?,sig=?,text=?,parts=?,nparts=?,done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=?,prov=? WHERE id=?").bind(ntitle, ctitle, sig, text, JSON.stringify(parts), parts.length, now, prov, ex.id).run(); updated++; }
       }
       return json({ ok: true, added, updated, skipped });
     }
