@@ -98,11 +98,11 @@ const userOut = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, 
 let migrated = false;
 async function ensureSchema(env) {
   if (migrated) return;
-  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio'], ['users', 'links'], ['novels', 'hidden'], ['users', 'payout'], ['users', 'points']];
+  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio'], ['users', 'links'], ['novels', 'hidden'], ['users', 'payout'], ['users', 'points'], ['users', 'last_ip'], ['users', 'last_seen']];
   for (const [t, c] of need) {
     try { await env.DB.prepare(`SELECT ${c} FROM ${t} LIMIT 1`).first(); }
     catch (e) {
-      const def = c === 'points' ? 'REAL NOT NULL DEFAULT 0' : (c === 'locked' || c === 'premium_until' || c === 'hidden') ? 'INTEGER NOT NULL DEFAULT 0' : (c === 'avatar' || c === 'bio' || c === 'payout') ? "TEXT NOT NULL DEFAULT ''" : "TEXT NOT NULL DEFAULT '{}'";
+      const def = c === 'last_seen' ? 'INTEGER NOT NULL DEFAULT 0' : c === 'last_ip' ? "TEXT NOT NULL DEFAULT ''" : c === 'points' ? 'REAL NOT NULL DEFAULT 0' : (c === 'locked' || c === 'premium_until' || c === 'hidden') ? 'INTEGER NOT NULL DEFAULT 0' : (c === 'avatar' || c === 'bio' || c === 'payout') ? "TEXT NOT NULL DEFAULT ''" : "TEXT NOT NULL DEFAULT '{}'";
       await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`).run();
     }
   }
@@ -112,6 +112,9 @@ async function ensureSchema(env) {
     'CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL, kind TEXT NOT NULL, novel_id INTEGER NOT NULL, title TEXT NOT NULL, ts INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)',
     'CREATE TABLE IF NOT EXISTS sessions (uid INTEGER NOT NULL, dev TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (uid, dev))',
+    'CREATE TABLE IF NOT EXISTS presence (dev TEXT PRIMARY KEY, uid INTEGER NOT NULL DEFAULT 0, ip TEXT NOT NULL DEFAULT \'\', seen INTEGER NOT NULL DEFAULT 0)',
+    'CREATE INDEX IF NOT EXISTS idx_presence_seen ON presence(seen)',
+    'CREATE TABLE IF NOT EXISTS visits (day TEXT NOT NULL, dev TEXT NOT NULL, uid INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, dev))',
     'CREATE TABLE IF NOT EXISTS dev_accts (dev TEXT NOT NULL, uid INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (dev, uid))',
     'CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, kind TEXT NOT NULL, novel_ref TEXT NOT NULL, who TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, ts INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS idx_notes_uid ON notes(uid, ts)',
@@ -717,7 +720,7 @@ export default {
   },
   // كل دقيقة: يكمّل تحويل الفصول في الطابور (بحد يومي)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureSchema(env); try { await ptsTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureSchema(env); try { await ptsTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM visits WHERE day<?').bind(dayKey(Date.now() - 45 * 86400000)).run(); await env.DB.prepare('DELETE FROM presence WHERE seen<?').bind(Date.now() - 2 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } catch (e) {} })());
   }
 };
 
@@ -847,6 +850,22 @@ async function route(request, env) {
   /* ----- المسابقات (عام) ----- */
   if (path === '/api/contest' && m === 'GET') { const me = request.headers.get('Authorization') ? await authUser(env, request) : null; return json(await contestPublic(env, me), 200, { 'Cache-Control': 'no-store' }); }
   if (path === '/api/points' && m === 'GET') { const me = request.headers.get('Authorization') ? await authUser(env, request) : null; return json(await pointsPublic(env, me), 200, { 'Cache-Control': 'no-store' }); }
+
+  /* ----- حضور الزوار (أونلاين / زيارات) ----- */
+  if (path === '/api/ping' && m === 'POST') {
+    const dev = devOf(request); if (!dev) return json({ ok: true });
+    if (await tooMany(env, 'ping:' + dev, 12, 600000)) return json({ ok: true });
+    await noteAttempt(env, 'ping:' + dev);
+    let uid = 0; const hm = /^Bearer (.+)$/.exec(request.headers.get('Authorization') || ''); if (hm) { try { const tp = await readToken(env, hm[1]); if (tp && tp.uid) uid = +tp.uid || 0; } catch (e) {} }
+    const now = Date.now(), ipv = String(ip || '').slice(0, 64);
+    try {
+      await env.DB.batch([
+        env.DB.prepare('INSERT INTO presence (dev,uid,ip,seen) VALUES (?,?,?,?) ON CONFLICT(dev) DO UPDATE SET uid=excluded.uid,ip=excluded.ip,seen=excluded.seen').bind(dev, uid, ipv, now),
+        env.DB.prepare('INSERT INTO visits (day,dev,uid) VALUES (?,?,?) ON CONFLICT(day,dev) DO UPDATE SET uid=CASE WHEN excluded.uid>0 THEN excluded.uid ELSE visits.uid END').bind(dayKey(now), dev, uid),
+        ...(uid ? [env.DB.prepare('UPDATE users SET last_ip=?,last_seen=? WHERE id=?').bind(ipv, now, uid)] : [])]);
+    } catch (e) {}
+    return json({ ok: true });
+  }
 
   /* ----- كل ما بعد كده يحتاج تسجيل دخول ----- */
   const user = await authUser(env, request);
@@ -1420,9 +1439,20 @@ async function route(request, env) {
       await env.DB.prepare('UPDATE users SET premium_until=? WHERE id=?').bind(until, u.id).run();
       return json({ ok: true, premiumUntil: until });
     }
+    if (path === '/api/admin/online' && m === 'GET') {
+      const now = Date.now(), cnt = async (sql, ...b) => (await env.DB.prepare(sql).bind(...b).first()).n || 0;
+      const d0 = dayKey(now), d7 = dayKey(now - 6 * 86400000), d30 = dayKey(now - 29 * 86400000), on = now - 3 * 60000;
+      const out = {
+        online: await cnt('SELECT COUNT(*) AS n FROM presence WHERE seen>?', on), onlineUsers: await cnt('SELECT COUNT(*) AS n FROM presence WHERE seen>? AND uid>0', on),
+        day: await cnt('SELECT COUNT(*) AS n FROM visits WHERE day=?', d0), dayUsers: await cnt('SELECT COUNT(*) AS n FROM visits WHERE day=? AND uid>0', d0),
+        week: await cnt('SELECT COUNT(DISTINCT dev) AS n FROM visits WHERE day>=?', d7), weekUsers: await cnt('SELECT COUNT(DISTINCT uid) AS n FROM visits WHERE day>=? AND uid>0', d7),
+        month: await cnt('SELECT COUNT(DISTINCT dev) AS n FROM visits WHERE day>=?', d30), monthUsers: await cnt('SELECT COUNT(DISTINCT uid) AS n FROM visits WHERE day>=? AND uid>0', d30), since: 0 };
+      const f = await env.DB.prepare('SELECT MIN(day) AS d FROM visits').first(); out.since = f && f.d || '';
+      return json(out);
+    }
     if (path === '/api/admin/users' && m === 'GET') {
-      const { results } = await env.DB.prepare('SELECT u.id,u.email,u.name,u.role,u.created_at,u.premium_until,(SELECT COUNT(*) FROM novels n WHERE n.user_id=u.id) AS novels FROM users u ORDER BY u.id DESC LIMIT 1000').all();
-      return json({ users: results.map((u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, createdAt: u.created_at, premiumUntil: u.premium_until || 0, premium: isPremium(u), novels: u.novels })) });
+      const { results } = await env.DB.prepare('SELECT u.id,u.email,u.name,u.role,u.created_at,u.premium_until,u.last_ip,u.last_seen,(SELECT COUNT(*) FROM novels n WHERE n.user_id=u.id) AS novels FROM users u ORDER BY u.id DESC LIMIT 1000').all();
+      return json({ users: results.map((u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, createdAt: u.created_at, premiumUntil: u.premium_until || 0, premium: isPremium(u), novels: u.novels, lastIp: u.last_ip || '', lastSeen: u.last_seen || 0 })) });
     }
     if ((g = /^\/api\/admin\/users\/(\d+)\/reset$/.exec(path)) && m === 'POST') {
       const u = await env.DB.prepare('SELECT id,email FROM users WHERE id=?').bind(+g[1]).first();
