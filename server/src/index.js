@@ -115,6 +115,7 @@ async function ensureSchema(env) {
     'CREATE TABLE IF NOT EXISTS presence (dev TEXT PRIMARY KEY, uid INTEGER NOT NULL DEFAULT 0, ip TEXT NOT NULL DEFAULT \'\', seen INTEGER NOT NULL DEFAULT 0)',
     'CREATE INDEX IF NOT EXISTS idx_presence_seen ON presence(seen)',
     'CREATE TABLE IF NOT EXISTS visits (day TEXT NOT NULL, dev TEXT NOT NULL, uid INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, dev))',
+    "CREATE TABLE IF NOT EXISTS bcast (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL DEFAULT 0)",
     'CREATE TABLE IF NOT EXISTS dev_accts (dev TEXT NOT NULL, uid INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (dev, uid))',
     'CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, kind TEXT NOT NULL, novel_ref TEXT NOT NULL, who TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, ts INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS idx_notes_uid ON notes(uid, ts)',
@@ -720,7 +721,7 @@ export default {
   },
   // كل دقيقة: يكمّل تحويل الفصول في الطابور (بحد يومي)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureSchema(env); try { await ptsTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM visits WHERE day<?').bind(dayKey(Date.now() - 45 * 86400000)).run(); await env.DB.prepare('DELETE FROM presence WHERE seen<?').bind(Date.now() - 2 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureSchema(env); try { await ptsTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM notes WHERE ts<?').bind(Date.now() - 30 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM visits WHERE day<?').bind(dayKey(Date.now() - 45 * 86400000)).run(); await env.DB.prepare('DELETE FROM presence WHERE seen<?').bind(Date.now() - 2 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } catch (e) {} })());
   }
 };
 
@@ -851,6 +852,10 @@ async function route(request, env) {
   if (path === '/api/contest' && m === 'GET') { const me = request.headers.get('Authorization') ? await authUser(env, request) : null; return json(await contestPublic(env, me), 200, { 'Cache-Control': 'no-store' }); }
   if (path === '/api/points' && m === 'GET') { const me = request.headers.get('Authorization') ? await authUser(env, request) : null; return json(await pointsPublic(env, me), 200, { 'Cache-Control': 'no-store' }); }
 
+  if (path === '/api/bcast' && m === 'GET') {
+    const { results } = await env.DB.prepare('SELECT id,title,text,url,ts FROM bcast ORDER BY ts DESC LIMIT 60').all();
+    return json({ items: results.map((r) => ({ id: 'b' + r.id, title: r.title, text: r.text, url: r.url, ts: r.ts })) }, 200, { 'Cache-Control': 'public, max-age=15' });
+  }
   /* ----- حضور الزوار (أونلاين / زيارات) ----- */
   if (path === '/api/ping' && m === 'POST') {
     const dev = devOf(request); if (!dev) return json({ ok: true });
@@ -1423,10 +1428,22 @@ async function route(request, env) {
       await setSetting(env, 'vault', { keys, at: Date.now() });
       return json({ ok: true, count: Object.keys(keys).length });
     }
+    if ((g = /^\/api\/admin\/bcast\/(\d+)\/delete$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM bcast WHERE id=?').bind(+g[1]).run(); return json({ ok: true }); }
+    if (path === '/api/admin/notes/clear' && m === 'POST') {
+      const b = await body(request, 500).catch(() => ({})), days = Math.max(0, Math.min(3650, parseInt(b.days, 10) || 0));
+      const r = await env.DB.prepare('DELETE FROM notes WHERE ts<?').bind(days ? Date.now() - days * 86400000 : Date.now() + 1000).run();
+      return json({ ok: true, removed: (r.meta && r.meta.changes) || 0 });
+    }
     if (path === '/api/admin/push' && m === 'POST') {
       const b = await body(request, 20000);
-      await sendPush(env, str(b.title, 80).trim(), str(b.text, 300).trim(), cleanUrl(b.url));
-      return json({ ok: true });
+      const bt = str(b.title, 80).trim() || 'RadPad', bx = str(b.text, 600).trim() || bt, bu = cleanUrl(b.url);
+      if (!str(b.title, 80).trim() && !str(b.text, 600).trim()) return fail('اكتب عنوان أو نص الإشعار');
+      let id = 0;
+      if (b.bell !== false) { const r = await env.DB.prepare('INSERT INTO bcast (title,text,url,ts) VALUES (?,?,?,?)').bind(bt, bx, bu, Date.now()).run(); id = r.meta.last_row_id; await env.DB.prepare('DELETE FROM bcast WHERE id NOT IN (SELECT id FROM bcast ORDER BY ts DESC LIMIT 200)').run(); }
+      let pushErr = '';
+      if (b.push !== false) { try { await sendPush(env, bt, bx.slice(0, 300), bu); } catch (e) { pushErr = e.message || 'فشل إرسال الموبايل'; } }
+      if (pushErr && !id) return fail(pushErr, 502);
+      return json({ ok: true, id, pushErr });
     }
     if ((g = /^\/api\/admin\/users\/(\d+)\/devices\/reset$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM sessions WHERE uid=?').bind(+g[1]).run(); return json({ ok: true }); }
     if ((g = /^\/api\/admin\/users\/(\d+)\/premium$/.exec(path)) && m === 'POST') {
