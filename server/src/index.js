@@ -299,7 +299,7 @@ async function getTtsConf(env) {
   const xa = x.az || {}, voices = {};
   ROLES.forEach((r) => { const v = (xa.voices || {})[r] || {}, d = AZ_VOICES[r]; voices[r] = { v: /^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]{2,40}$/.test(String(v.v || '')) ? String(v.v) : d.v, rate: /^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.rate || '')) ? String(v.rate) : d.rate, pitch: /^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.pitch || '')) ? String(v.pitch) : d.pitch }; });
   const np = {}; Object.keys(x.novelProv || {}).slice(0, 2000).forEach((k) => { if (PROVS.includes(x.novelProv[k])) np[k] = x.novelProv[k]; });
-  return { model: x.model || TTS_DEFAULT.model, legacyModel: x.legacyModel || TTS_DEFAULT.legacyModel, style: x.style || TTS_DEFAULT.style, gv,
+  return { mm: x.mm === true, model: x.model || TTS_DEFAULT.model, legacyModel: x.legacyModel || TTS_DEFAULT.legacyModel, style: x.style || TTS_DEFAULT.style, gv,
     concurrency: n(x.concurrency, TTS_DEFAULT.concurrency, 1, 4), dailyMin: n(x.dailyMin, TTS_DEFAULT.dailyMin, 0, 100000), freeMin: n(x.freeMin, 0, 0, 100000), priceIn: n(x.priceIn, 0, 0, 1000), priceOut: n(x.priceOut, 0, 0, 1000),
     defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false, smart: x.smart !== false, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
     g2: { dailyMin: n((x.g2 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g2 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g2 || {}).concurrency, 2, 1, 4) },
@@ -473,7 +473,7 @@ function applyDict(runs, conf) { // قاموس النطق: كلمة=كلمة ب�
 }
 async function geminiPart(env, text, conf, ctx) { // جزء واحد: أدوار متعددة (حد أقصى متكلمين اثنين في الطلب)
   const runs = applyDict(conf.multi ? await smartRoles(env, text, conf, ctx) : [{ role: 'narrator', text: stripMarks(text) }], conf), groups = []; let cur = null;
-  for (const r of runs) { if (!cur || (!cur.roles.has(r.role) && cur.roles.size >= 2)) { cur = { roles: new Set(), items: [] }; groups.push(cur); } cur.roles.add(r.role); cur.items.push(r); }
+  for (const r of runs) { if (!cur || (!cur.roles.has(r.role) && cur.roles.size >= (conf.mm ? 2 : 1))) { cur = { roles: new Set(), items: [] }; groups.push(cur); } cur.roles.add(r.role); cur.items.push(r); }
   const wavs = []; let chars = 0;
   for (const g of groups) {
     const roles = [...g.roles], t = g.items.map((x) => x.text).join(' '); chars += t.length;
