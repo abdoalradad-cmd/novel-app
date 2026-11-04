@@ -116,6 +116,8 @@ async function ensureSchema(env) {
     'CREATE INDEX IF NOT EXISTS idx_presence_seen ON presence(seen)',
     'CREATE TABLE IF NOT EXISTS visits (day TEXT NOT NULL, dev TEXT NOT NULL, uid INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, dev))',
     "CREATE TABLE IF NOT EXISTS bcast (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS contact (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS news (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '', img TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL DEFAULT 0)",
     'CREATE TABLE IF NOT EXISTS dev_accts (dev TEXT NOT NULL, uid INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (dev, uid))',
     'CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, kind TEXT NOT NULL, novel_ref TEXT NOT NULL, who TEXT NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, ts INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS idx_notes_uid ON notes(uid, ts)',
@@ -192,7 +194,7 @@ function cleanNovel(b) {
   if ((lockAll || anyLocked) && !password) throw new Error('اكتب باسورد القفل أو شيل القفل');
   const extra = { subtitle: str(b.subtitle, LIM.subtitle).trim(), novelStatus: b.novelStatus === 'مكتملة' ? 'مكتملة' : 'مستمرة',
     promoUrl: cleanUrl(b.promoUrl), pdfUrl: cleanUrl(b.pdfUrl), grad: GRADS.includes(b.grad) ? b.grad : GRADS[0],
-    icon: ICONS.includes(b.icon) ? b.icon : 'fa-book', allowSharing: b.allowSharing !== false, password, lockAll, lockPdf: b.lockPdf !== false };
+    icon: ICONS.includes(b.icon) ? b.icon : 'fa-book', allowSharing: b.allowSharing !== false, paper: !!b.paper, password, lockAll, lockPdf: b.lockPdf !== false };
   extra.price = (lockAll || anyLocked || extra.pdfUrl) ? cleanPrice(b.price) : 0; extra.oldPrice = extra.price && cleanPrice(b.oldPrice) > extra.price ? cleanPrice(b.oldPrice) : 0;
   return { title, author: str(b.author, LIM.author).trim(), genre: str(b.genre, LIM.genre).trim() || 'عام',
     tags, synopsis: str(b.synopsis, LIM.synopsis), cover: cleanUrl(b.cover), extra: JSON.stringify(extra), chapters: chs };
@@ -218,7 +220,7 @@ const cleanPrice = (v) => { const n = parseFloat(String(v == null ? '' : v).repl
 function extraOf(raw) {
   const x = parseJson(raw);
   return { subtitle: x.subtitle || '', novelStatus: x.novelStatus || 'مستمرة', promoUrl: x.promoUrl || '', pdfUrl: x.pdfUrl || '', grad: GRADS.includes(x.grad) ? x.grad : GRADS[0],
-    icon: ICONS.includes(x.icon) ? x.icon : 'fa-book', allowSharing: x.allowSharing !== false, password: x.password || '', lockAll: !!x.lockAll, lockPdf: x.lockPdf !== false, price: cleanPrice(x.price), oldPrice: cleanPrice(x.oldPrice) };
+    icon: ICONS.includes(x.icon) ? x.icon : 'fa-book', allowSharing: x.allowSharing !== false, paper: !!x.paper, password: x.password || '', lockAll: !!x.lockAll, lockPdf: x.lockPdf !== false, price: cleanPrice(x.price), oldPrice: cleanPrice(x.oldPrice) };
 }
 function myNovelRow(r) {
   return { id: r.id, status: r.status, isLive: !!r.is_live, hidden: !!r.hidden, rejectReason: r.reject_reason, updatedAt: r.updated_at, publishedAt: r.published_at,
@@ -821,7 +823,7 @@ async function route(request, env) {
     return json({ novels: results.map((r) => {
       const x = extraOf(r.l_extra);
       return { id: r.id, title: r.l_title, subtitle: x.subtitle, author: r.l_author || r.owner, genre: r.l_genre, tags: parseTags(r.l_tags),
-        synopsis: r.l_synopsis, cover: r.l_cover, novelStatus: x.novelStatus, promoUrl: x.promoUrl, pdfUrl: x.pdfUrl, grad: x.grad, icon: x.icon, allowSharing: x.allowSharing, price: x.price, oldPrice: x.oldPrice, locked: !!(x.lockAll && x.password), pdfLocked: !!(x.password && x.lockPdf && (x.lockAll || chapLocked[r.id])),
+        synopsis: r.l_synopsis, cover: r.l_cover, novelStatus: x.novelStatus, promoUrl: x.promoUrl, pdfUrl: x.pdfUrl, grad: x.grad, icon: x.icon, allowSharing: x.allowSharing, paper: !!x.paper, price: x.price, oldPrice: x.oldPrice, locked: !!(x.lockAll && x.password), pdfLocked: !!(x.password && x.lockPdf && (x.lockAll || chapLocked[r.id])),
         publishedAt: r.published_at, owner: r.owner, uid: r.user_id, chapters: byNovel[r.id] || [] };
     }) }, 200, { 'Cache-Control': 'public, max-age=60' });
   }
@@ -900,6 +902,24 @@ async function route(request, env) {
     const { results } = await env.DB.prepare("SELECT nid,SUM(status='done') AS d,COUNT(*) AS n FROM tts_ch GROUP BY nid").all();
     const novels = {}; results.forEach((r) => { if (r.d > 0) novels[r.nid] = { d: r.d, n: r.n }; });
     return json({ hide: false, novels }, 200, { 'Cache-Control': 'public, max-age=60' });
+  }
+  if (path === '/api/news' && m === 'GET') {
+    const { results } = await env.DB.prepare('SELECT id,title,text,img,url,ts FROM news ORDER BY ts DESC LIMIT 50').all();
+    return json({ items: results }, 200, { 'Cache-Control': 'public, max-age=30' });
+  }
+  if (path === '/api/contact' && m === 'POST') {
+    const b = await body(request, 6000);
+    if (await tooMany(env, 'ct:' + ip, 5, 3600000)) return fail('بعتّ رسايل كتير، جرّب بعد شوية', 429);
+    const kinds = { inquiry: 'استفسار', complaint: 'شكوى', suggestion: 'اقتراح', bug: 'مشكلة تقنية', other: 'أخرى' }, kind = kinds[b.kind] ? b.kind : 'other';
+    const text = str(b.text, 1500).trim(), name = str(b.name, 60).trim(), email = str(b.email, 120).trim();
+    if (text.length < 5) return fail('اكتب رسالتك (5 حروف على الأقل)');
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return fail('الإيميل غير صحيح');
+    await noteAttempt(env, 'ct:' + ip);
+    let uid = 0; const hm = /^Bearer (.+)$/.exec(request.headers.get('Authorization') || ''); if (hm) { try { const tp = await readToken(env, hm[1]); if (tp && tp.uid) uid = +tp.uid || 0; } catch (e) {} }
+    await env.DB.prepare('INSERT INTO contact (uid,name,email,kind,text,ts) VALUES (?,?,?,?,?,?)').bind(uid, name, email, kind, text, Date.now()).run();
+    await env.DB.prepare('DELETE FROM contact WHERE id NOT IN (SELECT id FROM contact ORDER BY ts DESC LIMIT 500)').run();
+    try { const { results } = await env.DB.prepare("SELECT id FROM users WHERE role='admin'").all(); for (const a of results) await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(a.id, 'payment', 'pay', name || 'زائر', '📨 رسالة جديدة: ' + kinds[kind], text.slice(0, 120), Date.now()).run(); } catch (e) {}
+    return json({ ok: true });
   }
   if (path === '/api/bcast' && m === 'GET') {
     const { results } = await env.DB.prepare('SELECT id,title,text,url,ts FROM bcast ORDER BY ts DESC LIMIT 60').all();
@@ -1033,6 +1053,14 @@ async function route(request, env) {
     await env.DB.prepare('DELETE FROM notes WHERE ts < ?').bind(Date.now() - 60 * 86400000).run();
     try { await sendPush(env, head, text, '', 'u_' + target); } catch (e) {}
     return json({ ok: true });
+  }
+  if ((g = /^\/api\/my\/novels\/(\d+)\/paper$/.exec(path)) && m === 'PUT') { // تغيير نوع الرواية (ورقية/إلكترونية) فورًا من غير مراجعة
+    const b = await body(request, 500);
+    const r = await env.DB.prepare('SELECT id,user_id,d_extra,l_extra FROM novels WHERE id=?').bind(+g[1]).first();
+    if (!r || (r.user_id !== user.id && user.role !== 'admin')) return fail('الرواية مش موجودة', 404);
+    const up = (raw) => JSON.stringify({ ...parseJson(raw), paper: !!b.paper });
+    await env.DB.prepare('UPDATE novels SET d_extra=?,l_extra=? WHERE id=?').bind(up(r.d_extra), up(r.l_extra), r.id).run();
+    return json({ ok: true, paper: !!b.paper });
   }
   if ((g = /^\/api\/my\/novels\/(\d+)\/visibility$/.exec(path)) && m === 'PUT') {
     const b = await body(request);
@@ -1478,6 +1506,17 @@ async function route(request, env) {
       await setSetting(env, 'vault', { keys, at: Date.now() });
       return json({ ok: true, count: Object.keys(keys).length });
     }
+    if (path === '/api/admin/contact' && m === 'GET') { const { results } = await env.DB.prepare('SELECT id,uid,name,email,kind,text,ts FROM contact ORDER BY ts DESC LIMIT 200').all(); return json({ items: results }); }
+    if ((g = /^\/api\/admin\/contact\/(\d+)\/delete$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM contact WHERE id=?').bind(+g[1]).run(); return json({ ok: true }); }
+    if (path === '/api/admin/news' && m === 'POST') {
+      const b = await body(request, 4000), title = str(b.title, 120).trim(), text = str(b.text, 3000).trim();
+      if (!title) return fail('اكتب عنوان الخبر');
+      const r = await env.DB.prepare('INSERT INTO news (title,text,img,url,ts) VALUES (?,?,?,?,?)').bind(title, text, cleanUrl(b.img), cleanUrl(b.url), Date.now()).run();
+      await env.DB.prepare('DELETE FROM news WHERE id NOT IN (SELECT id FROM news ORDER BY ts DESC LIMIT 100)').run();
+      if (b.push) { try { await sendPush(env, '📰 ' + title, text.slice(0, 200), cleanUrl(b.url)); } catch (e) {} }
+      return json({ ok: true, id: r.meta.last_row_id });
+    }
+    if ((g = /^\/api\/admin\/news\/(\d+)\/delete$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM news WHERE id=?').bind(+g[1]).run(); return json({ ok: true }); }
     if ((g = /^\/api\/admin\/bcast\/(\d+)\/delete$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM bcast WHERE id=?').bind(+g[1]).run(); return json({ ok: true }); }
     if (path === '/api/admin/notes/clear' && m === 'POST') {
       const b = await body(request, 500).catch(() => ({})), days = Math.max(0, Math.min(3650, parseInt(b.days, 10) || 0));
