@@ -331,6 +331,11 @@ function findAudioB64(o, depth = 0) {
 }
 function toWav(b64) { const bytes = b64bytes(b64.replace(/\s+/g, '')); return String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) === 'RIFF' ? bytes : pcmToWav(bytes, 24000); }
 async function geminiSpeak(env, text, voiceName, conf, style) {
+  try { return await geminiSpeak0(env, text, voiceName, conf, style); } catch (e) {
+    if (e.code !== 429) throw e; await new Promise((r) => setTimeout(r, 4000)); return geminiSpeak0(env, text, voiceName, conf, style);
+  }
+}
+async function geminiSpeak0(env, text, voiceName, conf, style) {
   style = style || conf.style;
   const key = env.GEMINI_API_KEY; if (!key) { const e = new Error('not_configured'); e.code = 503; throw e; }
   let lastErr;
@@ -475,8 +480,28 @@ function applyDict(runs, conf) { // قاموس النطق: كلمة=كلمة ب�
   if (!pairs.length) return runs;
   return runs.map((r) => { let t = r.text; for (const [a, b] of pairs) t = t.split(a).join(b); return { role: r.role, text: t }; });
 }
+// تقليل عدد الطلبات لجوجل (حدّها في الدقيقة قليل): الأجزاء القصيرة تتدمج في اللي جنبها، وبحد أقصى 4 طلبات للجزء
+function mergeRuns(runs, maxCalls) {
+  const out = runs.map((r) => ({ role: r.role, text: r.text }));
+  const join = (i, j) => { out[j].text = i < j ? out[i].text + ' ' + out[j].text : out[j].text + ' ' + out[i].text; out.splice(i, 1); };
+  const fold = () => { for (let k = out.length - 1; k > 0; k--) if (out[k].role === out[k - 1].role) { out[k - 1].text += ' ' + out[k].text; out.splice(k, 1); } };
+  fold();
+  for (;;) {
+    let idx = -1, best = 1e9;
+    out.forEach((r, i) => { const need = out.length > maxCalls ? 1e9 : 45; if (r.text.length < best && (out.length > maxCalls || r.text.length < need) && out.length > 1) { best = r.text.length; idx = i; } });
+    if (idx < 0) break;
+    const r = out[idx], nb = idx === 0 ? 1 : (idx === out.length - 1 ? idx - 1 : (r.role === 'narrator' ? (out[idx - 1].role !== 'narrator' ? idx - 1 : idx + 1) : (out[idx - 1].text.length <= out[idx + 1].text.length ? idx - 1 : idx + 1)));
+    // الدور الأطول هو اللي بيفضل
+    const keep = out[nb].text.length >= r.text.length ? nb : idx; const other = keep === nb ? idx : nb;
+    const first = Math.min(idx, nb), second = Math.max(idx, nb);
+    const txt = out[first].text + ' ' + out[second].text, role = out[keep].role;
+    out.splice(second, 1); out[first] = { role, text: txt }; fold();
+    if (out.length <= 1) break;
+  }
+  return out;
+}
 async function geminiPart(env, text, conf, ctx) { // جزء واحد: أدوار متعددة (حد أقصى متكلمين اثنين في الطلب)
-  const runs = applyDict(conf.multi ? await smartRoles(env, text, conf, ctx) : [{ role: 'narrator', text: stripMarks(text) }], conf), groups = []; let cur = null;
+  const runs = mergeRuns(applyDict(conf.multi ? await smartRoles(env, text, conf, ctx) : [{ role: 'narrator', text: stripMarks(text) }], conf), 4), groups = []; let cur = null;
   for (const r of runs) { if (!cur || (!cur.roles.has(r.role) && cur.roles.size >= (conf.mm ? 2 : 1))) { cur = { roles: new Set(), items: [] }; groups.push(cur); } cur.roles.add(r.role); cur.items.push(r); }
   const wavs = new Array(groups.length); let chars = 0, nxt = 0;
   groups.forEach((g) => { chars += g.items.map((x) => x.text).join(' ').length; });
@@ -612,9 +637,10 @@ async function ttsStep0(env, opts = {}) {
       }
     }
     if (limited) {
-      await setSetting(env, key, { ...(await getSetting(env, key)), pausedUntil: Date.now() + 30 * 60000, exhaustedAt: Date.now() });
+      const cs = await getSetting(env, key), strikes = (cs.strikeAt && Date.now() - cs.strikeAt < 3600000 ? (cs.strikes || 0) : 0) + 1, wait = [2, 5, 15, 30][Math.min(3, strikes - 1)];
+      await setSetting(env, key, { ...cs, strikes, strikeAt: Date.now(), pausedUntil: Date.now() + wait * 60000, exhaustedAt: Date.now() });
       await ttsBump(env, prov, { limited: 1 });
-      await ttsAlertAdmins(env, '⚠️ تحويل الصوت وقف (' + PNAME[prov] + '): الحصة خلصت أو الطلبات كتيرة', PNAME[prov] + ' رفضت طلبات الصوت (429). التحويل واقف نص ساعة وهيكمّل لوحده. راجع حصتك أو فعّل الفوترة.', prov);
+      await ttsAlertAdmins(env, '⚠️ تحويل الصوت وقف (' + PNAME[prov] + '): الحصة خلصت أو الطلبات كتيرة', PNAME[prov] + ' رفضت طلبات الصوت (429). التحويل واقف شوية وهيكمّل لوحده. راجع حصتك أو فعّل الفوترة.', prov);
       err = 'limit'; break;
     }
     if (hardFail) { await ttsBump(env, prov, { fails: 1 }); break; }
