@@ -335,12 +335,12 @@ async function geminiSpeak(env, text, voiceName, conf, style) {
   const key = env.GEMINI_API_KEY; if (!key) { const e = new Error('not_configured'); e.code = 503; throw e; }
   let lastErr;
   try {
-    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST', signal: AbortSignal.timeout(40000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
       body: JSON.stringify({ model: conf.model, input: [{ type: 'user_input', content: [{ type: 'text', text, annotations: [{ type: 'speech_metadata', style }] }] }], response_format: { type: 'audio' }, generation_config: { speech_config: [{ voice: voiceName }] } }) });
     if (r.status === 429) { const e = new Error('busy'); e.code = 429; throw e; }
     if (r.ok) { const j = await r.json(); const b = findAudioB64(j); if (b) return toWav(b); lastErr = new Error('no_audio'); } else lastErr = new Error('gemini_' + r.status);
   } catch (e) { if (e.code === 429) throw e; lastErr = e; }
-  const r2 = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+  const r2 = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(40000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({ contents: [{ parts: [{ text: 'Read the following in a ' + style + ': ' + text }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } } } }) });
   if (r2.status === 429) { const e = new Error('busy'); e.code = 429; throw e; }
   if (!r2.ok) { const e = new Error('gemini_' + r2.status); e.code = 502; e.detail = lastErr && lastErr.message; throw e; }
@@ -442,7 +442,7 @@ const roleStyle = (conf, role) => role === 'narrator' ? conf.style : conf.style 
 async function geminiMulti(env, roleA, roleB, items, conf) { // سطرين متكلمين في طلب واحد
   const key = env.GEMINI_API_KEY, nm = { narrator: 'Narrator', man: 'Man', woman: 'Woman', boy: 'Boy', girl: 'Girl' };
   const prompt = 'Read this audiobook scene in natural Egyptian Arabic, expressive and warm. ' + [roleA, roleB].filter((r) => r !== 'narrator').map((r) => nm[r] + ' is ' + ROLE_EN[r] + (r === 'boy' || r === 'girl' ? ' (use a childlike voice)' : '') + '.').join(' ') + '\n' + items.map((it) => nm[it.role] + ': ' + it.text).join('\n');
-  const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+  const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(40000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { multiSpeakerVoiceConfig: { speakerVoiceConfigs: [roleA, roleB].map((ro) => ({ speaker: nm[ro], voiceConfig: { prebuiltVoiceConfig: { voiceName: conf.gv[ro] } } })) } } } }) });
   if (r.status === 429) { const e = new Error('busy'); e.code = 429; throw e; }
   if (!r.ok) { const e = new Error('gemini_' + r.status); e.code = 502; throw e; }
@@ -461,8 +461,8 @@ async function smartRoles(env, text, conf, ctx) {
       + 'Decide the speaker\'s gender from the clues: names, pronouns, verb forms (قال/قالت, رد/ردت), words like هي/هو/أمه/أبوه/زوجته/زوجها, who is being addressed, and the flow of the conversation (people usually alternate). '
       + 'Keep each character consistent across the excerpt and the context. A speech tag like "قالت سلمى" belongs to narrator but tells you the speaker of the neighbouring spoken segment. Use boy/girl only for clearly young children. '
       + 'Return ONLY a JSON array of exactly ' + base.length + ' strings, one per segment.\n\nCONTEXT (before):\n' + String(ctx || '').slice(-600) + '\n\nEXCERPT:\n' + list;
-    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.annModel + ':generateContent', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: { type: 'ARRAY', items: { type: 'STRING', enum: ROLE_ENUM } } } }) });
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.annModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(9000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0, thinkingConfig: { thinkingBudget: 0 }, responseMimeType: 'application/json', responseSchema: { type: 'ARRAY', items: { type: 'STRING', enum: ROLE_ENUM } } } }) });
     if (!r.ok) return base;
     const j = await r.json(), t = (((j.candidates || [])[0] || {}).content || {}).parts; const arr = JSON.parse((t || []).map((x) => x.text || '').join(''));
     if (!Array.isArray(arr) || arr.length !== base.length || !arr.every((x) => ROLE_ENUM.includes(x))) return base;
@@ -568,6 +568,15 @@ async function ttsWipeNovel(env, nid) { // مسح الصوت المتخزّن ل
 }
 // خطوة تحويل واحدة لمزوّد واحد: بتاخد أول فصل في طابوره (بالترتيب) وتولّد منه كام جزء، بشرط الحد اليومي. بتتنادى كل دقيقة من Cron.
 async function ttsStep(env, opts = {}) {
+  const prov0 = normProv(opts.prov), t00 = Date.now(); let res, ex;
+  try { res = await ttsStep0(env, opts); } catch (e) { ex = e; }
+  try {
+    const r = ex ? { err: String(ex.message || ex).slice(0, 160) } : { idle: res.idle || '', made: res.made || 0, ch: res.id || 0, done: res.done, total: res.total, st: res.status || '' };
+    await setSetting(env, 'tts_last_' + prov0, { at: Date.now(), ms: Date.now() - t00, ...r });
+  } catch (e) {}
+  if (ex) throw ex; return res;
+}
+async function ttsStep0(env, opts = {}) {
   const prov = normProv(opts.prov), conf = await getTtsConf(env);
   if (!provReady(env, conf, prov)) return { ok: false, idle: 'not_configured', prov };
   const now = Date.now(), key = stKey(prov), st = await getSetting(env, key);
@@ -630,7 +639,7 @@ async function ttsStats(env) {
     const ch = { queued: 0, running: 0, done: 0, failed: 0 }; q.results.filter((r) => r.prov === prov).forEach((r) => (ch[r.status] = r.n));
     const remChars = Math.round(novels.filter((r) => r.prov === prov).reduce((a, r) => a + (r.rem || 0), 0)), remSecs = remChars / CPS;
     const cap = provCap(conf, prov) * 60;
-    const o = { today, month, chapters: ch, pausedUntil: st.pausedUntil || 0, exhaustedAt: st.exhaustedAt || 0, dailyMin: cap / 60, usedTodayPct: cap ? Math.min(999, Math.round(today.secs / cap * 100)) : 100 };
+    const o = { last: await getSetting(env, 'tts_last_' + prov), today, month, chapters: ch, pausedUntil: st.pausedUntil || 0, exhaustedAt: st.exhaustedAt || 0, dailyMin: cap / 60, usedTodayPct: cap ? Math.min(999, Math.round(today.secs / cap * 100)) : 100 };
     if (prov === 'azure') {
       o.freeChars = conf.az.freeChars; o.monthPct = conf.az.freeChars ? Math.min(999, Math.round(month.chars / conf.az.freeChars * 100)) : null; o.extraCostMonth = Math.max(0, month.chars - conf.az.freeChars) * conf.az.price / 1e6;
       o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: remChars * conf.az.price / 1e6, days: cap ? Math.ceil(remSecs / cap) : null };
