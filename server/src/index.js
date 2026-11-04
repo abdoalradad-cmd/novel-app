@@ -330,6 +330,8 @@ function findAudioB64(o, depth = 0) {
   return '';
 }
 function toWav(b64) { const bytes = b64bytes(b64.replace(/\s+/g, '')); return String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) === 'RIFF' ? bytes : pcmToWav(bytes, 24000); }
+async function q429(r) { try { const t = await r.text(); let m = ''; try { const j = JSON.parse(t); m = (j.error && j.error.message) || ''; const d = JSON.stringify((j.error && j.error.details) || ''); const q = /"quotaId":"([^"]+)"/.exec(d); if (q) m += ' [' + q[1] + ']'; } catch (e) { m = t; } return String(m).slice(0, 260); } catch (e) { return ''; } }
+const pacificMinsLeft = () => { try { const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date()), h = +p.find((x) => x.type === 'hour').value, m = +p.find((x) => x.type === 'minute').value; return 24 * 60 - (h * 60 + m) + 2; } catch (e) { return 120; } };
 async function geminiSpeak(env, text, voiceName, conf, style) {
   try { return await geminiSpeak0(env, text, voiceName, conf, style); } catch (e) {
     if (e.code !== 429) throw e; await new Promise((r) => setTimeout(r, 4000)); return geminiSpeak0(env, text, voiceName, conf, style);
@@ -342,12 +344,12 @@ async function geminiSpeak0(env, text, voiceName, conf, style) {
   try {
     const r = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST', signal: AbortSignal.timeout(40000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
       body: JSON.stringify({ model: conf.model, input: [{ type: 'user_input', content: [{ type: 'text', text, annotations: [{ type: 'speech_metadata', style }] }] }], response_format: { type: 'audio' }, generation_config: { speech_config: [{ voice: voiceName }] } }) });
-    if (r.status === 429) { const e = new Error('busy'); e.code = 429; throw e; }
+    if (r.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r); throw e; }
     if (r.ok) { const j = await r.json(); const b = findAudioB64(j); if (b) return toWav(b); lastErr = new Error('no_audio'); } else lastErr = new Error('gemini_' + r.status);
   } catch (e) { if (e.code === 429) throw e; lastErr = e; }
   const r2 = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(40000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({ contents: [{ parts: [{ text: 'Read the following in a ' + style + ': ' + text }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } } } }) });
-  if (r2.status === 429) { const e = new Error('busy'); e.code = 429; throw e; }
+  if (r2.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r2); throw e; }
   if (!r2.ok) { const e = new Error('gemini_' + r2.status); e.code = 502; e.detail = lastErr && lastErr.message; throw e; }
   const b2 = findAudioB64(await r2.json()); if (!b2) { const e = new Error('no_audio'); e.code = 502; throw e; }
   return toWav(b2);
@@ -449,7 +451,7 @@ async function geminiMulti(env, roleA, roleB, items, conf) { // سطرين مت�
   const prompt = 'Read this audiobook scene in natural Egyptian Arabic, expressive and warm. ' + [roleA, roleB].filter((r) => r !== 'narrator').map((r) => nm[r] + ' is ' + ROLE_EN[r] + (r === 'boy' || r === 'girl' ? ' (use a childlike voice)' : '') + '.').join(' ') + '\n' + items.map((it) => nm[it.role] + ': ' + it.text).join('\n');
   const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(40000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { multiSpeakerVoiceConfig: { speakerVoiceConfigs: [roleA, roleB].map((ro) => ({ speaker: nm[ro], voiceConfig: { prebuiltVoiceConfig: { voiceName: conf.gv[ro] } } })) } } } }) });
-  if (r.status === 429) { const e = new Error('busy'); e.code = 429; throw e; }
+  if (r.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r); throw e; }
   if (!r.ok) { const e = new Error('gemini_' + r.status); e.code = 502; throw e; }
   const b = findAudioB64(await r.json()); if (!b) { const e = new Error('no_audio'); e.code = 502; throw e; }
   return toWav(b);
@@ -519,7 +521,7 @@ function azureSsml(runs, conf) {
 async function azureSpeakRuns(env, runs, conf) {
   const region = azRegion(env, conf);
   const r = await fetch('https://' + region + '.tts.speech.microsoft.com/cognitiveservices/v1', { method: 'POST', headers: { 'Ocp-Apim-Subscription-Key': env.AZURE_SPEECH_KEY, 'Content-Type': 'application/ssml+xml', 'X-Microsoft-OutputFormat': 'riff-24khz-16bit-mono-pcm', 'User-Agent': 'RadPad' }, body: azureSsml(runs, conf) });
-  if (r.status === 429) { const e = new Error('busy'); e.code = 429; throw e; }
+  if (r.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r); throw e; }
   if (r.status === 401 || r.status === 403) { const e = new Error('azure_key_or_region_wrong'); e.code = 401; throw e; }
   if (!r.ok) { const e = new Error('azure_' + r.status); e.code = 502; throw e; }
   const b = new Uint8Array(await r.arrayBuffer()); if (b.length < 100) { const e = new Error('no_audio'); e.code = 502; throw e; } return b;
@@ -596,7 +598,7 @@ async function ttsStep(env, opts = {}) {
   const prov0 = normProv(opts.prov), t00 = Date.now(); let res, ex;
   try { res = await ttsStep0(env, opts); } catch (e) { ex = e; }
   try {
-    const r = ex ? { err: String(ex.message || ex).slice(0, 160) } : { idle: res.idle || '', made: res.made || 0, ch: res.id || 0, done: res.done, total: res.total, st: res.status || '' };
+    const r = ex ? { err: String(ex.message || ex).slice(0, 160) } : res.limit ? { err: 'جوجل رفضت (429): ' + res.limit, made: res.made || 0 } : { idle: res.idle || '', made: res.made || 0, ch: res.id || 0, done: res.done, total: res.total, st: res.status || '' };
     await setSetting(env, 'tts_last_' + prov0, { at: Date.now(), ms: Date.now() - t00, ...r });
   } catch (e) {}
   if (ex) throw ex; return res;
@@ -614,7 +616,7 @@ async function ttsStep0(env, opts = {}) {
   if (r && r.meta && typeof r.meta.changes === 'number' && !r.meta.changes) return { ok: true, idle: 'empty', prov };
   const ch = await env.DB.prepare("SELECT * FROM tts_ch WHERE owner=? AND status='running'").bind(tok).first();
   if (!ch) return { ok: true, idle: 'empty', prov };
-  const parts = JSON.parse(ch.parts || '[]'); let done = ch.done, secsTot = ch.secs, made = 0, err = '', hardFail = false;
+  const parts = JSON.parse(ch.parts || '[]'); let done = ch.done, secsTot = ch.secs, made = 0, err = '', hardFail = false, limMsg = '';
   const t0 = Date.now();
   while (done < parts.length && Date.now() - t0 < 22000 && made < 8 && used < cap) {
     const idxs = []; for (let k = 0; k < par && done + k < parts.length && made + k < 8; k++) idxs.push(done + k);
@@ -633,12 +635,12 @@ async function ttsStep0(env, opts = {}) {
         if (prefix) done++;
       } else {
         prefix = false; const e = x.reason || {};
-        if (e.code === 429) limited = true; else { err = String(e.message || 'error').slice(0, 100); hardFail = true; }
+        if (e.code === 429) { limited = true; limMsg = e.detail || limMsg; } else { err = String(e.message || 'error').slice(0, 100); hardFail = true; }
       }
     }
     if (limited) {
-      const cs = await getSetting(env, key), strikes = (cs.strikeAt && Date.now() - cs.strikeAt < 3600000 ? (cs.strikes || 0) : 0) + 1, wait = [2, 5, 15, 30][Math.min(3, strikes - 1)];
-      await setSetting(env, key, { ...cs, strikes, strikeAt: Date.now(), pausedUntil: Date.now() + wait * 60000, exhaustedAt: Date.now() });
+      const cs = await getSetting(env, key), strikes = (cs.strikeAt && Date.now() - cs.strikeAt < 3600000 ? (cs.strikes || 0) : 0) + 1, daily = /PerDay|per day|daily/i.test(limMsg), wait = daily ? Math.min(720, pacificMinsLeft()) : [2, 5, 15, 30][Math.min(3, strikes - 1)];
+      await setSetting(env, key, { ...cs, strikes, strikeAt: Date.now(), pausedUntil: Date.now() + wait * 60000, exhaustedAt: Date.now(), limMsg, limDaily: daily });
       await ttsBump(env, prov, { limited: 1 });
       await ttsAlertAdmins(env, '⚠️ تحويل الصوت وقف (' + PNAME[prov] + '): الحصة خلصت أو الطلبات كتيرة', PNAME[prov] + ' رفضت طلبات الصوت (429). التحويل واقف شوية وهيكمّل لوحده. راجع حصتك أو فعّل الفوترة.', prov);
       err = 'limit'; break;
@@ -649,7 +651,7 @@ async function ttsStep0(env, opts = {}) {
   const status = complete ? 'done' : (hardFail && tries >= 5 ? 'failed' : 'queued');
   await env.DB.prepare("UPDATE tts_ch SET status=?,owner='',lock_until=0,done=?,secs=?,attempts=?,err=?,retry_at=?,updated=? WHERE id=?")
     .bind(status, done, secsTot, hardFail ? tries : (made ? 0 : ch.attempts), complete ? '' : err, hardFail ? Date.now() + 60000 : 0, Date.now(), ch.id).run();
-  return { ok: true, id: ch.id, prov, done, total: parts.length, status, made };
+  return { ok: true, id: ch.id, prov, done, total: parts.length, status, made, limit: limMsg };
 }
 async function ttsStats(env) {
   const conf = await getTtsConf(env), d = dayKey(), mo = d.slice(0, 7), pr = ttsPrices(conf);
@@ -665,7 +667,7 @@ async function ttsStats(env) {
     const ch = { queued: 0, running: 0, done: 0, failed: 0 }; q.results.filter((r) => r.prov === prov).forEach((r) => (ch[r.status] = r.n));
     const remChars = Math.round(novels.filter((r) => r.prov === prov).reduce((a, r) => a + (r.rem || 0), 0)), remSecs = remChars / CPS;
     const cap = provCap(conf, prov) * 60;
-    const o = { last: await getSetting(env, 'tts_last_' + prov), today, month, chapters: ch, pausedUntil: st.pausedUntil || 0, exhaustedAt: st.exhaustedAt || 0, dailyMin: cap / 60, usedTodayPct: cap ? Math.min(999, Math.round(today.secs / cap * 100)) : 100 };
+    const o = { last: await getSetting(env, 'tts_last_' + prov), today, month, chapters: ch, pausedUntil: st.pausedUntil || 0, limMsg: st.limMsg || '', limDaily: !!st.limDaily, exhaustedAt: st.exhaustedAt || 0, dailyMin: cap / 60, usedTodayPct: cap ? Math.min(999, Math.round(today.secs / cap * 100)) : 100 };
     if (prov === 'azure') {
       o.freeChars = conf.az.freeChars; o.monthPct = conf.az.freeChars ? Math.min(999, Math.round(month.chars / conf.az.freeChars * 100)) : null; o.extraCostMonth = Math.max(0, month.chars - conf.az.freeChars) * conf.az.price / 1e6;
       o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: remChars * conf.az.price / 1e6, days: cap ? Math.ceil(remSecs / cap) : null };
