@@ -13,7 +13,7 @@ const CORS = {
   'Access-Control-Max-Age': '86400'
 };
 function json(data, status = 200, extra = {}) {
-  return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...CORS, ...extra } });
+  return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', ...CORS, ...extra } });
 }
 const fail = (msg, status = 400) => json({ error: msg }, status);
 
@@ -305,7 +305,7 @@ async function getTtsConf(env) {
   const np = {}; Object.keys(x.novelProv || {}).slice(0, 2000).forEach((k) => { if (PROVS.includes(x.novelProv[k])) np[k] = x.novelProv[k]; });
   return { mm: x.mm === true, model: x.model || TTS_DEFAULT.model, legacyModel: x.legacyModel || TTS_DEFAULT.legacyModel, style: x.style || TTS_DEFAULT.style, gv,
     concurrency: n(x.concurrency, TTS_DEFAULT.concurrency, 1, 4), dailyMin: n(x.dailyMin, TTS_DEFAULT.dailyMin, 0, 100000), freeMin: n(x.freeMin, 0, 0, 100000), priceIn: n(x.priceIn, 0, 0, 1000), priceOut: n(x.priceOut, 0, 0, 1000),
-    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false, smart: x.smart !== false, econ: x.econ !== false, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
+    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false, smart: x.smart !== false, econ: x.econ !== false, hideListen: x.hideListen === true, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
     g2: { dailyMin: n((x.g2 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g2 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g2 || {}).concurrency, 2, 1, 4) },
     g3: { dailyMin: n((x.g3 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g3 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g3 || {}).concurrency, 2, 1, 4) },
     az: { region: /^[a-z0-9-]{3,30}$/.test(String(xa.region || '')) ? String(xa.region) : '', dailyMin: n(xa.dailyMin, 30, 0, 100000), freeChars: n(xa.freeChars, 500000, 0, 1e9), price: n(xa.price, 15, 0, 1000), concurrency: n(xa.concurrency, 3, 1, 8), voices } };
@@ -895,6 +895,12 @@ async function route(request, env) {
   if (path === '/api/contest' && m === 'GET') { const me = request.headers.get('Authorization') ? await authUser(env, request) : null; return json(await contestPublic(env, me), 200, { 'Cache-Control': 'no-store' }); }
   if (path === '/api/points' && m === 'GET') { const me = request.headers.get('Authorization') ? await authUser(env, request) : null; return json(await pointsPublic(env, me), 200, { 'Cache-Control': 'no-store' }); }
 
+  if (path === '/api/tts/ready' && m === 'GET') {
+    const conf = await getTtsConf(env); if (conf.hideListen) return json({ hide: true, novels: {} }, 200, { 'Cache-Control': 'public, max-age=30' });
+    const { results } = await env.DB.prepare("SELECT nid,SUM(status='done') AS d,COUNT(*) AS n FROM tts_ch GROUP BY nid").all();
+    const novels = {}; results.forEach((r) => { if (r.d > 0) novels[r.nid] = { d: r.d, n: r.n }; });
+    return json({ hide: false, novels }, 200, { 'Cache-Control': 'public, max-age=60' });
+  }
   if (path === '/api/bcast' && m === 'GET') {
     const { results } = await env.DB.prepare('SELECT id,title,text,url,ts FROM bcast ORDER BY ts DESC LIMIT 60').all();
     return json({ items: results.map((r) => ({ id: 'b' + r.id, title: r.title, text: r.text, url: r.url, ts: r.ts })) }, 200, { 'Cache-Control': 'public, max-age=15' });
@@ -902,8 +908,8 @@ async function route(request, env) {
   /* ----- حضور الزوار (أونلاين / زيارات) ----- */
   if (path === '/api/ping' && m === 'POST') {
     const dev = devOf(request); if (!dev) return json({ ok: true });
-    if (await tooMany(env, 'ping:' + dev, 12, 600000)) return json({ ok: true });
-    await noteAttempt(env, 'ping:' + dev);
+    if (await tooMany(env, 'ping:' + dev, 12, 600000) || await tooMany(env, 'pingip:' + ip, 150, 600000)) return json({ ok: true });
+    await noteAttempt(env, 'ping:' + dev); await noteAttempt(env, 'pingip:' + ip);
     let uid = 0; const hm = /^Bearer (.+)$/.exec(request.headers.get('Authorization') || ''); if (hm) { try { const tp = await readToken(env, hm[1]); if (tp && tp.uid) uid = +tp.uid || 0; } catch (e) {} }
     const now = Date.now(), ipv = String(ip || '').slice(0, 64);
     try {
@@ -1045,6 +1051,7 @@ async function route(request, env) {
 
   /* ----- الصوت المصري (للمشتركين) ----- */
   if (path === '/api/tts/chapter' && m === 'GET') {
+    if ((await getTtsConf(env)).hideListen) return fail('الاستماع متوقف مؤقتًا', 403);
     if (!isPremium(user)) return fail('الاستماع لمشتركي Premium', 403);
     const nid = str(url.searchParams.get('nid'), 80), ix = parseInt(url.searchParams.get('idx'), 10);
     const c = await env.DB.prepare('SELECT id,status,parts,done,nparts,secs,LENGTH(text) AS total FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
@@ -1261,7 +1268,7 @@ async function route(request, env) {
       ROLES.forEach((r) => { const v = (ba.voices || {})[r]; if (v && typeof v === 'object') { const o = { ...cur.az.voices[r] }; if (/^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]{2,40}$/.test(String(v.v || ''))) o.v = String(v.v); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.rate || ''))) o.rate = String(v.rate); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.pitch || ''))) o.pitch = String(v.pitch); az.voices[r] = o; } });
       await setSetting(env, 'tts', { model: nm(b.model, cur.model), legacyModel: nm(b.legacyModel, cur.legacyModel), style: str(b.style, 200).trim() || cur.style, gv,
         concurrency: nu(b.concurrency, cur.concurrency, 1, 4), dailyMin: nu(b.dailyMin, cur.dailyMin, 0, 100000), freeMin: nu(b.freeMin, cur.freeMin, 0, 100000), priceIn: nu(b.priceIn, cur.priceIn, 0, 1000), priceOut: nu(b.priceOut, cur.priceOut, 0, 1000),
-        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, multi: b.multi == null ? cur.multi : !!b.multi, econ: b.econ == null ? cur.econ : !!b.econ, smart: b.smart == null ? cur.smart : !!b.smart, annModel: nm(b.annModel, cur.annModel), dict: b.dict == null ? cur.dict : String(b.dict).slice(0, 3000), az,
+        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, multi: b.multi == null ? cur.multi : !!b.multi, econ: b.econ == null ? cur.econ : !!b.econ, hideListen: b.hideListen == null ? cur.hideListen : !!b.hideListen, smart: b.smart == null ? cur.smart : !!b.smart, annModel: nm(b.annModel, cur.annModel), dict: b.dict == null ? cur.dict : String(b.dict).slice(0, 3000), az,
         g2: { dailyMin: nu((b.g2 || {}).dailyMin, cur.g2.dailyMin, 0, 100000), freeMin: nu((b.g2 || {}).freeMin, cur.g2.freeMin, 0, 100000), concurrency: nu((b.g2 || {}).concurrency, cur.g2.concurrency, 1, 4) },
         g3: { dailyMin: nu((b.g3 || {}).dailyMin, cur.g3.dailyMin, 0, 100000), freeMin: nu((b.g3 || {}).freeMin, cur.g3.freeMin, 0, 100000), concurrency: nu((b.g3 || {}).concurrency, cur.g3.concurrency, 1, 4) } });
       return json({ ok: true, ...(await ttsStats(env)) });
@@ -1479,6 +1486,8 @@ async function route(request, env) {
     }
     if (path === '/api/admin/push' && m === 'POST') {
       const b = await body(request, 20000);
+      if (await tooMany(env, 'push:' + user.id, 30, 3600000)) return fail('بعتّ إشعارات كتير، استنى شوية', 429);
+      await noteAttempt(env, 'push:' + user.id);
       const bt = str(b.title, 80).trim() || 'RadPad', bx = str(b.text, 600).trim() || bt, bu = cleanUrl(b.url);
       if (!str(b.title, 80).trim() && !str(b.text, 600).trim()) return fail('اكتب عنوان أو نص الإشعار');
       let id = 0;
