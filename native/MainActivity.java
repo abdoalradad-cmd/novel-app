@@ -14,6 +14,8 @@ import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.JavascriptInterface;
+import android.view.WindowManager;
 
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -149,16 +151,38 @@ public class MainActivity extends BridgeActivity {
         } catch (Throwable t) { }
     }
 
-    @Override
+        // ===== منع لقطات الشاشة وتسجيل الشاشة (FLAG_SECURE) =====
+    // مفعّل افتراضيًا لكل المستخدمين. الأدمن بس بيقفله من الموقع عن طريق RadPadSecure.set(false) علشان يقدر يصوّر.
+    private void setSecure(final boolean on) {
+        try {
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    try {
+                        if (on) getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
+                        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                    } catch (Throwable t) { }
+                }
+            });
+        } catch (Throwable t) { }
+    }
+
+    private class SecureBridge {
+        @JavascriptInterface
+        public void set(boolean on) { setSecure(on); }
+    }
+
+@Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AppNativePlugin.class);
         super.onCreate(savedInstanceState);
+        setSecure(true);
         initPush();
         installOfflineFirstClient();
         applyCacheMode(true);
         watchNetwork();
         try {
             WebView wv = getBridge().getWebView();
+            try { wv.addJavascriptInterface(new SecureBridge(), "RadPadSecure"); } catch (Throwable t) { }
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 Set<String> origins = new HashSet<String>();
                 origins.add(SITE_ORIGIN);
