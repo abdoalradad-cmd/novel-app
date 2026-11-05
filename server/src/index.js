@@ -653,7 +653,7 @@ async function ttsStep0(env, opts = {}) {
       }
     }
     if (limited) {
-      const cs = await getSetting(env, key), strikes = (cs.strikeAt && Date.now() - cs.strikeAt < 3600000 ? (cs.strikes || 0) : 0) + 1, daily = /PerDay|per day|daily/i.test(limMsg), wait = daily ? Math.min(720, pacificMinsLeft()) : [2, 5, 15, 30][Math.min(3, strikes - 1)];
+      const cs = await getSetting(env, key), strikes = (cs.strikeAt && Date.now() - cs.strikeAt < 3600000 ? (cs.strikes || 0) : 0) + 1, daily = /PerDay|per day|daily/i.test(limMsg), wait = 30; // زي الأول: لو جوجل رفض، نستنى نص ساعة ونبعت الفصل تاني
       await setSetting(env, key, { ...cs, strikes, strikeAt: Date.now(), pausedUntil: Date.now() + wait * 60000, exhaustedAt: Date.now(), limMsg, limDaily: daily });
       await ttsBump(env, prov, { limited: 1 });
       await ttsAlertAdmins(env, '⚠️ تحويل الصوت وقف (' + PNAME[prov] + '): الحصة خلصت أو الطلبات كتيرة', PNAME[prov] + ' رفضت طلبات الصوت (429). التحويل واقف شوية وهيكمّل لوحده. راجع حصتك أو فعّل الفوترة.', prov);
@@ -1289,6 +1289,34 @@ async function route(request, env) {
     return json({ ok: true });
   }
 
+    if (path === '/api/my/import/wattpad' && m === 'POST') {
+      if (user.role !== 'admin') { if (await tooMany(env, 'wpimp:' + user.id, 6, 86400000)) return fail('وصلت للحد اليومي للاستيراد، جرّب بكرة'); await noteAttempt(env, 'wpimp:' + user.id); }
+      const b = await body(request, 1000), u0 = str(b.url, 300), mm = /wattpad\.com\/(?:story\/)?(\d+)/.exec(u0);
+      if (!mm) return fail('لينك واتباد غير صحيح');
+      const H = { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36', Accept: 'application/json' };
+      let sid = mm[1];
+      if (!/wattpad\.com\/story\//.test(u0)) { const pr = await fetch('https://www.wattpad.com/api/v3/story_parts/' + sid + '?fields=group(id)', { headers: H }); if (pr.ok) { const pj = await pr.json(); if (pj && pj.group && pj.group.id) sid = String(pj.group.id); } }
+      const r = await fetch('https://www.wattpad.com/api/v3/stories/' + sid + '?fields=id,title,description,cover,user(name),parts(id,title)', { headers: H });
+      if (!r.ok) return fail('واتباد رفض الطلب (' + r.status + ') — ممكن الرواية خاصة أو واتباد حاجب السيرفر', 502);
+      const j = await r.json(); if (!j || !Array.isArray(j.parts) || !j.parts.length) return fail('مفيش فصول في اللينك ده', 404);
+      return json({ id: String(j.id), title: str(j.title, 200), author: str((j.user || {}).name, 100), synopsis: str(j.description, 3000), cover: str(j.cover, 500), parts: j.parts.map((x) => ({ id: String(x.id), title: str(x.title, 200) })) });
+    }
+    if (path === '/api/my/import/wattpad/run' && m === 'POST') {
+      const b = await body(request, 20000), nid = +b.novelId, parts = Array.isArray(b.parts) ? b.parts.slice(0, 6) : [];
+      if (!nid || !parts.length || !(await env.DB.prepare('SELECT 1 AS x FROM novels WHERE id=? AND user_id=?').bind(nid, user.id).first())) return fail('بيانات غير صحيحة');
+      const dec = (t) => t.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
+      const texts = await Promise.all(parts.map(async (pt) => {
+        if (!/^\d{1,15}$/.test(String(pt.id))) return '';
+        try { const r = await fetch('https://www.wattpad.com/apiv2/storytext?id=' + pt.id, { headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) Chrome/120 Mobile Safari/537.36' } }); if (!r.ok) return ''; const h = await r.text();
+          return dec(h.replace(/<\s*br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n\n').replace(/<[^>]+>/g, '')).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(); } catch (e) { return ''; }
+      }));
+      const have = (await env.DB.prepare("SELECT COUNT(*) AS n FROM chapters WHERE novel_id=? AND ver='d'").bind(nid).first()).n; if (user.role !== 'admin' && have + parts.length > 400) return fail('الحد الأقصى 400 فصل');
+      let idx = ((await env.DB.prepare("SELECT COALESCE(MAX(idx),-1) AS m FROM chapters WHERE novel_id=? AND ver='d'").bind(nid).first()) || {}).m + 1, ok = 0; const failed = [];
+      const st = [];
+      parts.forEach((pt, i) => { if (!texts[i]) { failed.push(i); return; } st.push(env.DB.prepare("INSERT INTO chapters (novel_id,ver,idx,title,content,locked) VALUES (?,?,?,?,?,0)").bind(nid, 'd', idx++, str(pt.title, 200) || ('الفصل ' + idx), texts[i])); ok++; });
+      if (st.length) await env.DB.batch(st);
+      return json({ ok, failed });
+    }
   /* ----- الأدمن ----- */
   if (path.startsWith('/api/admin/')) {
     if (user.role !== 'admin') return fail('للأدمن فقط', 403);
@@ -1579,32 +1607,6 @@ async function route(request, env) {
     }
     if (path === '/api/admin/contact' && m === 'GET') { const { results } = await env.DB.prepare('SELECT id,uid,name,email,kind,text,ts FROM contact ORDER BY ts DESC LIMIT 200').all(); return json({ items: results }); }
     if ((g = /^\/api\/admin\/contact\/(\d+)\/delete$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM contact WHERE id=?').bind(+g[1]).run(); return json({ ok: true }); }
-    if (path === '/api/admin/import/wattpad' && m === 'POST') {
-      const b = await body(request, 1000), u0 = str(b.url, 300), mm = /wattpad\.com\/(?:story\/)?(\d+)/.exec(u0);
-      if (!mm) return fail('لينك واتباد غير صحيح');
-      const H = { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36', Accept: 'application/json' };
-      let sid = mm[1];
-      if (!/wattpad\.com\/story\//.test(u0)) { const pr = await fetch('https://www.wattpad.com/api/v3/story_parts/' + sid + '?fields=group(id)', { headers: H }); if (pr.ok) { const pj = await pr.json(); if (pj && pj.group && pj.group.id) sid = String(pj.group.id); } }
-      const r = await fetch('https://www.wattpad.com/api/v3/stories/' + sid + '?fields=id,title,description,cover,user(name),parts(id,title)', { headers: H });
-      if (!r.ok) return fail('واتباد رفض الطلب (' + r.status + ') — ممكن الرواية خاصة أو واتباد حاجب السيرفر', 502);
-      const j = await r.json(); if (!j || !Array.isArray(j.parts) || !j.parts.length) return fail('مفيش فصول في اللينك ده', 404);
-      return json({ id: String(j.id), title: str(j.title, 200), author: str((j.user || {}).name, 100), synopsis: str(j.description, 3000), cover: str(j.cover, 500), parts: j.parts.map((x) => ({ id: String(x.id), title: str(x.title, 200) })) });
-    }
-    if (path === '/api/admin/import/wattpad/run' && m === 'POST') {
-      const b = await body(request, 20000), nid = +b.novelId, parts = Array.isArray(b.parts) ? b.parts.slice(0, 6) : [];
-      if (!nid || !parts.length || !(await env.DB.prepare('SELECT 1 AS x FROM novels WHERE id=? AND user_id=?').bind(nid, user.id).first())) return fail('بيانات غير صحيحة');
-      const dec = (t) => t.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
-      const texts = await Promise.all(parts.map(async (pt) => {
-        if (!/^\d{1,15}$/.test(String(pt.id))) return '';
-        try { const r = await fetch('https://www.wattpad.com/apiv2/storytext?id=' + pt.id, { headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) Chrome/120 Mobile Safari/537.36' } }); if (!r.ok) return ''; const h = await r.text();
-          return dec(h.replace(/<\s*br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n\n').replace(/<[^>]+>/g, '')).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(); } catch (e) { return ''; }
-      }));
-      let idx = ((await env.DB.prepare("SELECT COALESCE(MAX(idx),-1) AS m FROM chapters WHERE novel_id=? AND ver='d'").bind(nid).first()) || {}).m + 1, ok = 0; const failed = [];
-      const st = [];
-      parts.forEach((pt, i) => { if (!texts[i]) { failed.push(i); return; } st.push(env.DB.prepare("INSERT INTO chapters (novel_id,ver,idx,title,content,locked) VALUES (?,?,?,?,?,0)").bind(nid, 'd', idx++, str(pt.title, 200) || ('الفصل ' + idx), texts[i])); ok++; });
-      if (st.length) await env.DB.batch(st);
-      return json({ ok, failed });
-    }
     if (path === '/api/admin/cmt' && m === 'GET') return json(await cmtConf(env));
     if (path === '/api/admin/cmt' && m === 'PUT') { const b = await body(request, 500), cur = await cmtConf(env); await setSetting(env, 'cmt', { perCh: b.perCh ?? cur.perCh, perDay: b.perDay ?? cur.perDay, pts: b.pts ?? cur.pts, minLen: b.minLen ?? cur.minLen, dayPts: b.dayPts ?? cur.dayPts, newsPerDay: b.newsPerDay ?? cur.newsPerDay }); return json({ ok: true, ...(await cmtConf(env)) }); }
     if (path === '/api/admin/news/pending' && m === 'GET') { const { results } = await env.DB.prepare("SELECT n.id,n.title,n.text,n.img,n.ts,n.author_uid AS auid,u.name AS author,u.avatar AS aavatar FROM news n LEFT JOIN users u ON u.id=n.author_uid WHERE n.status='pending' ORDER BY n.ts DESC LIMIT 50").all(); return json({ items: results }); }
