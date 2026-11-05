@@ -98,17 +98,20 @@ const userOut = (u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, 
 let migrated = false;
 async function ensureSchema(env) {
   if (migrated) return;
-  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio'], ['users', 'links'], ['novels', 'hidden'], ['users', 'payout'], ['users', 'points'], ['users', 'last_ip'], ['users', 'last_seen']];
+  const need = [['novels', 'd_extra'], ['novels', 'l_extra'], ['chapters', 'locked'], ['users', 'premium_until'], ['users', 'avatar'], ['users', 'bio'], ['users', 'links'], ['novels', 'hidden'], ['users', 'payout'], ['users', 'points'], ['users', 'last_ip'], ['users', 'last_seen'], ['users', 'wallet']];
   for (const [t, c] of need) {
     try { await env.DB.prepare(`SELECT ${c} FROM ${t} LIMIT 1`).first(); }
     catch (e) {
-      const def = c === 'last_seen' ? 'INTEGER NOT NULL DEFAULT 0' : c === 'last_ip' ? "TEXT NOT NULL DEFAULT ''" : c === 'points' ? 'REAL NOT NULL DEFAULT 0' : (c === 'locked' || c === 'premium_until' || c === 'hidden') ? 'INTEGER NOT NULL DEFAULT 0' : (c === 'avatar' || c === 'bio' || c === 'payout') ? "TEXT NOT NULL DEFAULT ''" : "TEXT NOT NULL DEFAULT '{}'";
+      const def = c === 'last_seen' ? 'INTEGER NOT NULL DEFAULT 0' : c === 'last_ip' ? "TEXT NOT NULL DEFAULT ''" : (c === 'points' || c === 'wallet') ? 'REAL NOT NULL DEFAULT 0' : (c === 'locked' || c === 'premium_until' || c === 'hidden') ? 'INTEGER NOT NULL DEFAULT 0' : (c === 'avatar' || c === 'bio' || c === 'payout') ? "TEXT NOT NULL DEFAULT ''" : "TEXT NOT NULL DEFAULT '{}'";
       await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`).run();
     }
   }
   for (const q of ['CREATE TABLE IF NOT EXISTS follows (follower_id INTEGER NOT NULL, author_id INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (follower_id, author_id))',
     'CREATE INDEX IF NOT EXISTS idx_follows_author ON follows(author_id)',
     'CREATE TABLE IF NOT EXISTS reads (k TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0)',
+    'CREATE TABLE IF NOT EXISTS read_seen (h TEXT NOT NULL, k TEXT NOT NULL, ch INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (h, k, ch))',
+    "CREATE TABLE IF NOT EXISTS cmt_log (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, nid TEXT NOT NULL, ch INTEGER NOT NULL, norm TEXT NOT NULL DEFAULT '', day TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL DEFAULT 0, elig INTEGER NOT NULL DEFAULT 0, awarded INTEGER NOT NULL DEFAULT 0)",
+    'CREATE INDEX IF NOT EXISTS idx_cmt_uid ON cmt_log(uid, day)',
     'CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL, kind TEXT NOT NULL, novel_id INTEGER NOT NULL, title TEXT NOT NULL, ts INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)',
     'CREATE TABLE IF NOT EXISTS sessions (uid INTEGER NOT NULL, dev TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (uid, dev))',
@@ -139,6 +142,9 @@ async function ensureSchema(env) {
     'CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, created_at)',
     'CREATE TABLE IF NOT EXISTS tts_usage (day TEXT PRIMARY KEY, reqs INTEGER NOT NULL DEFAULT 0, hits INTEGER NOT NULL DEFAULT 0, chars INTEGER NOT NULL DEFAULT 0, secs REAL NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, fails INTEGER NOT NULL DEFAULT 0, limited INTEGER NOT NULL DEFAULT 0)']) await env.DB.prepare(q).run();
   try { await env.DB.prepare('SELECT prov FROM tts_ch LIMIT 1').first(); } catch (e) { await env.DB.prepare("ALTER TABLE tts_ch ADD COLUMN prov TEXT NOT NULL DEFAULT 'gemini'").run(); }
+  for (const [c, d] of [['author_uid', 'INTEGER NOT NULL DEFAULT 0'], ['status', "TEXT NOT NULL DEFAULT 'ok'"]]) {
+    try { await env.DB.prepare('SELECT ' + c + ' FROM news LIMIT 1').first(); } catch (e) { try { await env.DB.prepare('ALTER TABLE news ADD COLUMN ' + c + ' ' + d).run(); } catch (e2) {} }
+  }
   migrated = true;
 }
 
@@ -690,6 +696,19 @@ async function ttsStats(env) {
 
 /* ---------- المسابقة الأسبوعية + نقاط الكتّاب + قرعة نقاط الفوز ---------- */
 const DAYMS = 86400000, PT_PER_VOTE = 0.1;
+const cairoDay = () => new Date(Date.now() + 2 * 3600000).toISOString().slice(0, 10);
+const cairoDayStart = () => Date.parse(cairoDay() + 'T00:00:00Z') - 2 * 3600000;
+async function cmtConf(env) { const c = await getSetting(env, 'cmt'); const n = (v, d, a, z) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(z, v)) : d; }; return { perCh: n(c.perCh, 2, 0, 50), perDay: n(c.perDay, 5, 0, 500), pts: n(c.pts, 1, 0, 1000), minLen: n(c.minLen, 15, 3, 500), dayPts: n(c.dayPts, 5, 0, 500), newsPerDay: n(c.newsPerDay, 1, 0, 20) }; }
+const normTxt = (t) => String(t).toLowerCase().replace(/[\u064B-\u065F\u0670\u0640]/g, '').replace(/[أإآ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+const jacc = (a, b) => { const x = new Set(a.split(' ')), y = new Set(b.split(' ')); let i = 0; x.forEach((w) => { if (y.has(w)) i++; }); const u = x.size + y.size - i; return u ? i / u : 0; };
+const fnv = (t) => { let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); };
+async function awardCmt(env, uid, logId, conf) {
+  const got = await env.DB.prepare('SELECT COUNT(*) AS n FROM cmt_log WHERE uid=? AND day=? AND awarded=1').bind(uid, cairoDay()).first();
+  if ((got && got.n) >= conf.dayPts || conf.pts <= 0) return 0;
+  const r = await env.DB.prepare('UPDATE cmt_log SET awarded=1 WHERE id=? AND awarded=0').bind(logId).run();
+  if (r && r.meta && r.meta.changes) { await env.DB.prepare('UPDATE users SET wallet=ROUND(wallet+?,1) WHERE id=?').bind(conf.pts, uid).run(); return conf.pts; }
+  return 0;
+}
 function weekStart(t = Date.now()) { // أول يوم في الأسبوع = السبت (بتوقيت مصر تقريبًا)
   const d = new Date(t + 2 * 3600000), back = (d.getUTCDay() + 1) % 7;
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - back * DAYMS).toISOString().slice(0, 10);
@@ -858,15 +877,17 @@ async function route(request, env) {
   }
 
   if (path === '/api/reads' && m === 'GET') {
-    const { results } = await env.DB.prepare('SELECT k,n FROM reads ORDER BY n DESC LIMIT 300').all();
+    const { results } = await env.DB.prepare('SELECT k,n FROM reads ORDER BY n DESC LIMIT 1000').all();
     const o = {}; results.forEach((r) => { o[r.k] = r.n; });
-    return json({ reads: o }, 200, { 'Cache-Control': 'public, max-age=60' });
+    return json({ reads: o }, 200, { 'Cache-Control': 'public, max-age=20' });
   }
   if (path === '/api/reads' && m === 'POST') {
-    const b = await body(request, 2000), k = str(b.k, 60);
-    if (!/^[A-Za-z0-9_-]{1,60}$/.test(k)) return fail('مفتاح غير صحيح');
-    if (await tooMany(env, 'rd:' + ip + ':' + k, 1, 6 * 3600000) || await tooMany(env, 'rdip:' + ip, 40, 3600000)) return json({ ok: true, skipped: true });
-    await noteAttempt(env, 'rd:' + ip + ':' + k); await noteAttempt(env, 'rdip:' + ip);
+    const b = await body(request, 2000), k = str(b.k, 60), ch = Number.isInteger(+b.ch) ? Math.max(0, Math.min(9999, +b.ch)) : -1;
+    if (!/^[A-Za-z0-9_-]{1,60}$/.test(k) || ch < 0) return fail('مفتاح غير صحيح');
+    if (await tooMany(env, 'rdip:' + ip, 80, 3600000)) return json({ ok: true, skipped: true });
+    const ins = await env.DB.prepare('INSERT OR IGNORE INTO read_seen (h,k,ch,ts) VALUES (?,?,?,?)').bind(fnv(ip), k, ch, Date.now()).run();
+    if (!(ins && ins.meta && ins.meta.changes)) return json({ ok: true, dup: true });
+    await noteAttempt(env, 'rdip:' + ip);
     await env.DB.prepare('INSERT INTO reads (k,n) VALUES (?,1) ON CONFLICT(k) DO UPDATE SET n=n+1').bind(k).run();
     return json({ ok: true });
   }
@@ -904,7 +925,7 @@ async function route(request, env) {
     return json({ hide: false, novels }, 200, { 'Cache-Control': 'public, max-age=60' });
   }
   if (path === '/api/news' && m === 'GET') {
-    const { results } = await env.DB.prepare('SELECT id,title,text,img,url,ts FROM news ORDER BY ts DESC LIMIT 50').all();
+    const { results } = await env.DB.prepare("SELECT n.id,n.title,n.text,n.img,n.url,n.ts,n.author_uid AS auid,u.name AS author,u.avatar AS aavatar FROM news n LEFT JOIN users u ON u.id=n.author_uid AND n.author_uid>0 WHERE n.status='ok' ORDER BY n.ts DESC LIMIT 50").all();
     return json({ items: results }, 200, { 'Cache-Control': 'public, max-age=30' });
   }
   if (path === '/api/contact' && m === 'POST') {
@@ -965,7 +986,49 @@ async function route(request, env) {
     await env.DB.prepare('INSERT INTO contest_answers (week,user_id,answers,ts) VALUES (?,?,?,?)').bind(cur, user.id, JSON.stringify(answers), Date.now()).run();
     return json({ ok: true });
   }
-  if (path === '/api/me/points' && m === 'GET') return json({ points: (await env.DB.prepare('SELECT points FROM users WHERE id=?').bind(user.id).first() || {}).points || 0 });
+  if (path === '/api/me/points' && m === 'GET') { const r0 = await env.DB.prepare('SELECT points,wallet FROM users WHERE id=?').bind(user.id).first() || {}; const cf = await cmtConf(env), td = await env.DB.prepare('SELECT COUNT(*) AS n FROM cmt_log WHERE uid=? AND day=?').bind(user.id, cairoDay()).first(); return json({ points: r0.points || 0, wallet: r0.wallet || 0, cmt: { perCh: cf.perCh, perDay: cf.perDay, today: (td && td.n) || 0, pts: cf.pts } }); }
+  if (path === '/api/cmt/gate' && m === 'POST') {
+    const b = await body(request, 3000), cf = await cmtConf(env), nid = str(b.novel, 60), ch = Number.isInteger(+b.chapter) ? Math.max(-1, Math.min(9999, +b.chapter)) : -1, text = str(b.text, 1000).trim();
+    if (!/^[A-Za-z0-9_-]{1,60}$/.test(nid)) return fail('رواية غير صحيحة');
+    if (text.length < 2) return fail('اكتب تعليق');
+    const day = cairoDay(), isAdm = user.role === 'admin';
+    if (!isAdm) {
+      const dn = await env.DB.prepare('SELECT COUNT(*) AS n FROM cmt_log WHERE uid=? AND day=?').bind(user.id, day).first();
+      if ((dn && dn.n) >= cf.perDay) return json({ ok: false, reason: 'خلّصت تعليقاتك النهارده (' + cf.perDay + ' تعليقات في اليوم) 💬 ارجع بكرة' });
+      const cn = await env.DB.prepare('SELECT COUNT(*) AS n FROM cmt_log WHERE uid=? AND nid=? AND ch=?').bind(user.id, nid, ch).first();
+      if ((cn && cn.n) >= cf.perCh) return json({ ok: false, reason: 'ممكن تعلّق مرتين بس على الفصل الواحد (' + cf.perCh + ')' });
+    }
+    const norm = normTxt(text), words = norm.split(' ').filter(Boolean);
+    const { results: mine } = await env.DB.prepare('SELECT norm FROM cmt_log WHERE uid=? ORDER BY id DESC LIMIT 40').bind(user.id).all();
+    if (!isAdm && mine.some((r) => r.norm === norm)) return json({ ok: false, reason: 'التعليق ده كتبته قبل كده، اكتب كلام جديد ✍️' });
+    let why = '';
+    if (norm.length < cf.minLen || words.length < 3) why = 'التعليق قصير — اكتب جملة تشجيع حقيقية (' + cf.minLen + ' حرف على الأقل) علشان تاخد نقطة';
+    else if (/(.)\1{4,}/u.test(norm.replace(/\s/g, '')) || new Set(words).size < Math.ceil(words.length / 2)) why = 'التعليق فيه تكرار كلمات — مفيش نقطة';
+    else if (mine.some((r) => jacc(r.norm, norm) >= 0.7)) why = 'التعليق شبه تعليق قديم ليك — مفيش نقطة';
+    else { const x = await env.DB.prepare('SELECT 1 AS x FROM cmt_log WHERE norm=? LIMIT 1').bind(norm).first(); if (x) why = 'التعليق ده اتكتب قبل كده من حد — مفيش نقطة'; }
+    const mm = /^u(\d+)$/.exec(nid); if (!why && mm) { const nv = await env.DB.prepare('SELECT user_id FROM novels WHERE id=?').bind(+mm[1]).first(); if (nv && nv.user_id === user.id) why = 'مفيش نقاط على رواياتك'; }
+    const elig = why ? 0 : 1;
+    const ins = await env.DB.prepare('INSERT INTO cmt_log (uid,nid,ch,norm,day,ts,elig,awarded) VALUES (?,?,?,?,?,?,?,0)').bind(user.id, nid, ch, norm, day, Date.now(), elig).run();
+    let pts = 0, hint = why;
+    if (elig) {
+      const vt = await env.DB.prepare('SELECT 1 AS x FROM pts_votes WHERE voter=? AND nid=? AND ch=?').bind(user.id, nid, ch).first();
+      if (vt) { pts = await awardCmt(env, user.id, ins.meta.last_row_id, cf); if (!pts) hint = 'وصلت للحد اليومي للنقاط'; }
+      else hint = 'قيّم الفصل بنجوم كمان وهتاخد النقطة ⭐';
+    }
+    return json({ ok: true, points: pts, hint });
+  }
+  if (path === '/api/my/news' && m === 'GET') { const { results } = await env.DB.prepare('SELECT id,title,text,img,status,ts FROM news WHERE author_uid=? ORDER BY ts DESC LIMIT 30').bind(user.id).all(); return json({ items: results }); }
+  if (path === '/api/my/news' && m === 'POST') {
+    const b = await body(request, 6000), cf = await cmtConf(env), title = str(b.title, 120).trim(), text = str(b.text, 2000).trim();
+    if (!title || text.length < 10) return fail('اكتب عنوان وتفاصيل للبوست');
+    const isAdm = user.role === 'admin';
+    if (!isAdm && !(await env.DB.prepare('SELECT 1 AS x FROM novels WHERE user_id=? LIMIT 1').bind(user.id).first())) return fail('النشر في الأخبار للكتّاب بس', 403);
+    if (!isAdm) { const dn = await env.DB.prepare('SELECT COUNT(*) AS n FROM news WHERE author_uid=? AND ts>=?').bind(user.id, cairoDayStart()).first(); if ((dn && dn.n) >= cf.newsPerDay) return fail('ممكن تنشر ' + cf.newsPerDay + ' بوست في اليوم بس، جرّب بكرة'); }
+    const st = isAdm ? 'ok' : 'pending';
+    const r = await env.DB.prepare('INSERT INTO news (title,text,img,url,ts,author_uid,status) VALUES (?,?,?,?,?,?,?)').bind(title, text, cleanUrl(b.img), '', Date.now(), user.id, st).run();
+    if (!isAdm) await notifyAdmins(env, user.name, '📰 بوست جديد من كاتب مستني مراجعتك', title, 'news');
+    return json({ ok: true, id: r.meta.last_row_id, status: st });
+  }
   if (path === '/api/me' && m === 'GET') return json({ user: userOut(user) });
   if (path === '/api/me' && m === 'PUT') {
     const b = await body(request), name = b.name === undefined ? user.name : str(b.name, 40).trim();
@@ -1043,7 +1106,10 @@ async function route(request, env) {
     if (kind === 'rating') { // كل تصويت لفصل = 0.1 نقطة للكاتب (مرة واحدة لكل قارئ لكل فصل)
       const ch = Number.isInteger(+b.chapter) ? Math.max(-1, Math.min(9999, +b.chapter)) : -1;
       const ins = await env.DB.prepare('INSERT OR IGNORE INTO pts_votes (voter,nid,ch,ts) VALUES (?,?,?,?)').bind(user.id, ref, ch, Date.now()).run();
-      if (ins && ins.meta && ins.meta.changes) await env.DB.prepare('UPDATE users SET points=ROUND(points+?,1) WHERE id=?').bind(PT_PER_VOTE, target).run();
+      if (ins && ins.meta && ins.meta.changes) {
+        await env.DB.prepare('UPDATE users SET points=ROUND(points+?,1) WHERE id=?').bind(PT_PER_VOTE, target).run();
+        try { const pc = await env.DB.prepare('SELECT id FROM cmt_log WHERE uid=? AND nid=? AND ch=? AND elig=1 AND awarded=0 ORDER BY id LIMIT 1').bind(user.id, ref, ch).first(); if (pc) await awardCmt(env, user.id, pc.id, await cmtConf(env)); } catch (e) {}
+      }
     }
     const title = str(b.title, 120).trim(), stars = Math.max(1, Math.min(5, +b.stars || 5));
     const snip = str(b.snippet, 400).trim().slice(0, 120);
@@ -1509,6 +1575,15 @@ async function route(request, env) {
     }
     if (path === '/api/admin/contact' && m === 'GET') { const { results } = await env.DB.prepare('SELECT id,uid,name,email,kind,text,ts FROM contact ORDER BY ts DESC LIMIT 200').all(); return json({ items: results }); }
     if ((g = /^\/api\/admin\/contact\/(\d+)\/delete$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM contact WHERE id=?').bind(+g[1]).run(); return json({ ok: true }); }
+    if (path === '/api/admin/cmt' && m === 'GET') return json(await cmtConf(env));
+    if (path === '/api/admin/cmt' && m === 'PUT') { const b = await body(request, 500), cur = await cmtConf(env); await setSetting(env, 'cmt', { perCh: b.perCh ?? cur.perCh, perDay: b.perDay ?? cur.perDay, pts: b.pts ?? cur.pts, minLen: b.minLen ?? cur.minLen, dayPts: b.dayPts ?? cur.dayPts, newsPerDay: b.newsPerDay ?? cur.newsPerDay }); return json({ ok: true, ...(await cmtConf(env)) }); }
+    if (path === '/api/admin/news/pending' && m === 'GET') { const { results } = await env.DB.prepare("SELECT n.id,n.title,n.text,n.img,n.ts,n.author_uid AS auid,u.name AS author,u.avatar AS aavatar FROM news n LEFT JOIN users u ON u.id=n.author_uid WHERE n.status='pending' ORDER BY n.ts DESC LIMIT 50").all(); return json({ items: results }); }
+    if ((g = /^\/api\/admin\/news\/(\d+)\/(approve|reject)$/.exec(path)) && m === 'POST') {
+      const row = await env.DB.prepare("SELECT author_uid,title FROM news WHERE id=? AND status='pending'").bind(+g[1]).first(); if (!row) return fail('مش موجود', 404);
+      if (g[2] === 'approve') { await env.DB.prepare("UPDATE news SET status='ok',ts=? WHERE id=?").bind(Date.now(), +g[1]).run(); await notifyUser(env, row.author_uid, '✅ بوستك اتنشر في الأخبار الأدبية', row.title, 'news'); }
+      else { await env.DB.prepare("UPDATE news SET status='no' WHERE id=?").bind(+g[1]).run(); await notifyUser(env, row.author_uid, 'بوستك ما اتنشرش', row.title, 'news'); }
+      return json({ ok: true });
+    }
     if (path === '/api/admin/news' && m === 'POST') {
       const b = await body(request, 4000), title = str(b.title, 120).trim(), text = str(b.text, 3000).trim();
       if (!title) return fail('اكتب عنوان الخبر');
