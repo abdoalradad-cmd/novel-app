@@ -313,7 +313,7 @@ async function getTtsConf(env) {
   const np = {}; Object.keys(x.novelProv || {}).slice(0, 2000).forEach((k) => { if (PROVS.includes(x.novelProv[k])) np[k] = x.novelProv[k]; });
   return { mm: x.mm !== false, model: x.model || TTS_DEFAULT.model, legacyModel: x.legacyModel || TTS_DEFAULT.legacyModel, style: x.style || TTS_DEFAULT.style, gv,
     concurrency: n(x.concurrency, TTS_DEFAULT.concurrency, 1, 4), dailyMin: n(x.dailyMin, TTS_DEFAULT.dailyMin, 0, 100000), freeMin: n(x.freeMin, 0, 0, 100000), priceIn: n(x.priceIn, 0, 0, 1000), priceOut: n(x.priceOut, 0, 0, 1000),
-    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false, smart: x.smart !== false, econ: x.econ !== false, hideListen: x.hideListen === true, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
+    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false, smart: x.smart !== false, econ: x.econ !== false, hideListen: x.hideListen === true, listenAll: x.listenAll === true, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
     g2: { dailyMin: n((x.g2 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g2 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g2 || {}).concurrency, 2, 1, 4) },
     g3: { dailyMin: n((x.g3 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g3 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g3 || {}).concurrency, 2, 1, 4) },
     az: { region: /^[a-z0-9-]{3,30}$/.test(String(xa.region || '')) ? String(xa.region) : '', dailyMin: n(xa.dailyMin, 30, 0, 100000), freeChars: n(xa.freeChars, 500000, 0, 1e9), price: n(xa.price, 15, 0, 1000), concurrency: n(xa.concurrency, 3, 1, 8), voices } };
@@ -453,10 +453,10 @@ function joinWavs(list) {
   let n = 0; pcms.forEach((p) => (n += p.length)); const all = new Uint8Array(n); let o = 0; pcms.forEach((p) => { all.set(p, o); o += p.length; }); return pcmToWav(all, 24000);
 }
 const ROLE_EN = { narrator: 'the narrator', man: 'an adult man', woman: 'an adult woman', boy: 'a young boy', girl: 'a young girl' };
-const roleStyle = (conf, role) => role === 'narrator' ? conf.style : conf.style + ', performing the character of ' + ROLE_EN[role] + (role === 'boy' || role === 'girl' ? ' with a childlike voice' : '');
+const roleStyle = (conf, role, emo) => (role === 'narrator' ? conf.style : conf.style + ', performing the character of ' + ROLE_EN[role] + (role === 'boy' || role === 'girl' ? ' with a childlike voice' : '')) + (emo ? ', acting it out: ' + emo : '');
 async function geminiMulti(env, roleA, roleB, items, conf) { // سطرين متكلمين في طلب واحد
   const key = env.GEMINI_API_KEY, nm = { narrator: 'Narrator', man: 'Man', woman: 'Woman', boy: 'Boy', girl: 'Girl' };
-  const prompt = 'Read this audiobook scene in natural Egyptian Arabic, expressive and warm. ' + [roleA, roleB].filter((r) => r !== 'narrator').map((r) => nm[r] + ' is ' + ROLE_EN[r] + (r === 'boy' || r === 'girl' ? ' (use a childlike voice)' : '') + '.').join(' ') + '\n' + items.map((it) => nm[it.role] + ': ' + it.text).join('\n');
+  const prompt = 'Perform this audiobook scene like a gifted voice actor in natural Egyptian Arabic, truly living the moment and reacting to what is happening (never robotic). Each line may carry a bracketed emotion/delivery direction after the speaker name: act it with that exact feeling and do NOT read the brackets aloud. ' + [roleA, roleB].filter((r) => r !== 'narrator').map((r) => nm[r] + ' is ' + ROLE_EN[r] + (r === 'boy' || r === 'girl' ? ' (use a childlike voice)' : '') + '.').join(' ') + '\n' + items.map((it) => nm[it.role] + (it.emo ? ' [' + it.emo + ']' : '') + ': ' + it.text).join('\n');
   const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { multiSpeakerVoiceConfig: { speakerVoiceConfigs: [roleA, roleB].map((ro) => ({ speaker: nm[ro], voiceConfig: { prebuiltVoiceConfig: { voiceName: conf.gv[ro] } } })) } } } }) });
   if (r.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r); throw e; }
@@ -468,33 +468,34 @@ async function geminiMulti(env, roleA, roleB, items, conf) { // سطرين مت�
 const ROLE_ENUM = ['narrator', 'man', 'woman', 'boy', 'girl'];
 async function smartRoles(env, text, conf, ctx) {
   const base = segmentRoles(text), key = env.GEMINI_API_KEY;
-  if (!conf.smart || !key || !base.some((r) => r.role !== 'narrator')) return base;
+  if (!conf.smart || !key) return base;
   try {
     const list = base.map((r, i) => '[' + i + '] ' + r.text).join('\n');
     const prompt = 'You are preparing an Arabic (Egyptian) novel for an audiobook with different voices. Below is the text before the excerpt (context only), then the excerpt split into numbered segments in order. '
       + 'For EACH numbered segment return who speaks it: "narrator" for narration/description (not spoken by a character), or "man", "woman", "boy", "girl" for a character\'s spoken words. '
       + 'Decide the speaker\'s gender from the clues: names, pronouns, verb forms (قال/قالت, رد/ردت), words like هي/هو/أمه/أبوه/زوجته/زوجها, who is being addressed, and the flow of the conversation (people usually alternate). '
       + 'Keep each character consistent across the excerpt and the context. A speech tag like "قالت سلمى" belongs to narrator but tells you the speaker of the neighbouring spoken segment. Use boy/girl only for clearly young children. '
-      + 'Return ONLY a JSON array of exactly ' + base.length + ' strings, one per segment.\n\nCONTEXT (before):\n' + String(ctx || '').slice(-600) + '\n\nEXCERPT:\n' + list;
+      + 'ALSO act like a director: for EACH segment give "e", a SHORT English performance direction (max 8 words) describing how the speaker feels and sounds right now, taken from the scene and from descriptions such as "قال بغضب", "قالت وهي تبكي", "همس", "صرخ", "ابتسم" (e.g. "furious, shouting through clenched teeth", "trembling, on the verge of tears", "soft, tender whisper", "tense suspenseful narration"). Use "" only if truly neutral. '
+      + 'Return ONLY a JSON array of exactly ' + base.length + ' objects {"r":role,"e":direction}, one per segment, in order.\n\nCONTEXT (before):\n' + String(ctx || '').slice(-600) + '\n\nEXCERPT:\n' + list;
     const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.annModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(9000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0, thinkingConfig: { thinkingBudget: 0 }, responseMimeType: 'application/json', responseSchema: { type: 'ARRAY', items: { type: 'STRING', enum: ROLE_ENUM } } } }) });
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0, thinkingConfig: { thinkingBudget: 0 }, responseMimeType: 'application/json', responseSchema: { type: 'ARRAY', items: { type: 'OBJECT', properties: { r: { type: 'STRING', enum: ROLE_ENUM }, e: { type: 'STRING' } }, required: ['r', 'e'] } } } }) });
     if (!r.ok) return base;
     const j = await r.json(), t = (((j.candidates || [])[0] || {}).content || {}).parts; const arr = JSON.parse((t || []).map((x) => x.text || '').join(''));
-    if (!Array.isArray(arr) || arr.length !== base.length || !arr.every((x) => ROLE_ENUM.includes(x))) return base;
-    const out = []; base.forEach((b, i) => { const role = base[i].role === 'narrator' ? 'narrator' : (arr[i] === 'narrator' ? base[i].role : arr[i]); const l = out[out.length - 1]; if (l && l.role === role) l.text += ' ' + b.text; else out.push({ role, text: b.text }); });
+    if (!Array.isArray(arr) || arr.length !== base.length || !arr.every((x) => x && ROLE_ENUM.includes(x.r))) return base;
+    const out = []; base.forEach((b, i) => { const role = base[i].role === 'narrator' ? 'narrator' : (arr[i].r === 'narrator' ? base[i].role : arr[i].r); const emo = String(arr[i].e || '').replace(/[\[\]\n]/g, ' ').trim().slice(0, 80); const l = out[out.length - 1]; if (l && l.role === role) { l.text += ' ' + b.text; if (!l.emo) l.emo = emo; } else out.push({ role, text: b.text, emo }); });
     return out;
   } catch (e) { return base; }
 }
 function applyDict(runs, conf) { // قاموس النطق: كلمة=كلمة بالتشكيل
   const pairs = String(conf.dict || '').split('\n').map((l) => { const k = l.indexOf('='); return k > 0 ? [l.slice(0, k).trim(), l.slice(k + 1).trim()] : null; }).filter((x) => x && x[0] && x[1]).sort((a, b) => b[0].length - a[0].length);
   if (!pairs.length) return runs;
-  return runs.map((r) => { let t = r.text; for (const [a, b] of pairs) t = t.split(a).join(b); return { role: r.role, text: t }; });
+  return runs.map((r) => { let t = r.text; for (const [a, b] of pairs) t = t.split(a).join(b); return { role: r.role, text: t, emo: r.emo }; });
 }
 // تقليل عدد الطلبات لجوجل (حدّها في الدقيقة قليل): الأجزاء القصيرة تتدمج في اللي جنبها، وبحد أقصى 4 طلبات للجزء
 function mergeRuns(runs, maxCalls, minLen = 45) {
-  const out = runs.map((r) => ({ role: r.role, text: r.text }));
-  const join = (i, j) => { out[j].text = i < j ? out[i].text + ' ' + out[j].text : out[j].text + ' ' + out[i].text; out.splice(i, 1); };
-  const fold = () => { for (let k = out.length - 1; k > 0; k--) if (out[k].role === out[k - 1].role) { out[k - 1].text += ' ' + out[k].text; out.splice(k, 1); } };
+  const out = runs.map((r) => ({ role: r.role, text: r.text, emo: r.emo }));
+  const join = (i, j) => { out[j].text = i < j ? out[i].text + ' ' + out[j].text : out[j].text + ' ' + out[i].text; if (!out[j].emo) out[j].emo = out[i].emo; out.splice(i, 1); };
+  const fold = () => { for (let k = out.length - 1; k > 0; k--) if (out[k].role === out[k - 1].role) { out[k - 1].text += ' ' + out[k].text; if (!out[k - 1].emo) out[k - 1].emo = out[k].emo; out.splice(k, 1); } };
   fold();
   for (;;) {
     let idx = -1, best = 1e9;
@@ -516,7 +517,7 @@ async function geminiPart(env, text, conf, ctx) { // جزء واحد: أدوار
   const wavs = new Array(groups.length); let chars = 0, nxt = 0;
   groups.forEach((g) => { chars += g.items.map((x) => x.text).join(' ').length; });
   const one = async (i) => { const g = groups[i], roles = [...g.roles], t = g.items.map((x) => x.text).join(' ');
-    wavs[i] = roles.length === 1 ? await geminiSpeak(env, t, conf.gv[roles[0]], conf, roleStyle(conf, roles[0])) : await geminiMulti(env, roles[0], roles[1], g.items, conf); };
+    wavs[i] = roles.length === 1 ? await geminiSpeak(env, t, conf.gv[roles[0]], conf, roleStyle(conf, roles[0], g.items.map((it) => it.emo).filter(Boolean)[0])) : await geminiMulti(env, roles[0], roles[1], g.items, conf); };
   // الأجزاء الصغيرة (الأدوار) بتتحوّل بالتوازي (3 مع بعض) علشان الجزء يخلص قبل ما الوقت يخلص
   await Promise.all(Array.from({ length: Math.min(3, groups.length) }, async () => { while (nxt < groups.length) { const i = nxt++; await one(i); } }));
   const wav = joinWavs(wavs); return { wav, chars, calls: groups.length };
@@ -745,12 +746,14 @@ async function ptsDraw(env, force) { // بيختار واحد عشوائي من 
   await notifyUser(env, w.id, '🏆 مبروك! فزت في نقاط الفوز', 'اتختارت الأسبوع ده من أعلى 10 كتّاب بالنقاط وفزت بـ ' + (pts.prize || 0) + ' جنيه. الإدارة هتتواصل معاك.', 'pay');
   return { ok: true, winner: { id: w.id, name: w.name }, week: cur };
 }
-async function ptsTick(env) { // من الـ Cron: قرعة تلقائية أول كل أسبوع (بعد أول أسبوع من التفعيل)
+async function ptsTick(env) { // من الـ Cron: قرعة أول كل أسبوع + تصفير نقاط الكتّاب لبداية منافسة جديدة (نقاط القرّاء "wallet" ما بتتصفّرش)
   const pts = await getSetting(env, 'pts'), cur = weekStart();
-  if (!pts.start) { await setSetting(env, 'pts', { ...pts, start: cur }); return; }
-  if (cur <= pts.start) return;
-  if (await env.DB.prepare('SELECT 1 FROM pts_draws WHERE week=?').bind(cur).first()) return;
-  await ptsDraw(env, false);
+  if (!pts.start) { await setSetting(env, 'pts', { ...pts, start: cur, rw: cur }); return; }
+  if (!pts.rw) { await setSetting(env, 'pts', { ...pts, rw: cur }); return; }
+  if (pts.rw === cur) return;
+  if (cur > pts.start && !(await env.DB.prepare('SELECT 1 FROM pts_draws WHERE week=?').bind(cur).first())) await ptsDraw(env, false);
+  await env.DB.prepare('UPDATE users SET points=0 WHERE points<>0').run();
+  await setSetting(env, 'pts', { ...(await getSetting(env, 'pts')), rw: cur });
 }
 
 /* ---------- إشعارات الموبايل (Firebase Cloud Messaging) ---------- */
@@ -922,7 +925,7 @@ async function route(request, env) {
     const conf = await getTtsConf(env); if (conf.hideListen) return json({ hide: true, novels: {} }, 200, { 'Cache-Control': 'public, max-age=30' });
     const { results } = await env.DB.prepare("SELECT nid,SUM(status='done') AS d,COUNT(*) AS n FROM tts_ch GROUP BY nid").all();
     const novels = {}; results.forEach((r) => { if (r.d > 0) novels[r.nid] = { d: r.d, n: r.n }; });
-    return json({ hide: false, novels }, 200, { 'Cache-Control': 'public, max-age=60' });
+    return json({ hide: false, open: conf.listenAll === true, novels }, 200, { 'Cache-Control': 'public, max-age=60' });
   }
   if (path === '/api/news' && m === 'GET') {
     const { results } = await env.DB.prepare("SELECT n.id,n.title,n.text,n.img,n.url,n.ts,n.author_uid AS auid,u.name AS author,u.avatar AS aavatar FROM news n LEFT JOIN users u ON u.id=n.author_uid AND n.author_uid>0 WHERE n.status='ok' ORDER BY n.ts DESC LIMIT 50").all();
@@ -1146,7 +1149,7 @@ async function route(request, env) {
   /* ----- الصوت المصري (للمشتركين) ----- */
   if (path === '/api/tts/chapter' && m === 'GET') {
     if ((await getTtsConf(env)).hideListen) return fail('الاستماع متوقف مؤقتًا', 403);
-    if (!isPremium(user)) return fail('الاستماع لمشتركي Premium', 403);
+    if (!isPremium(user) && !(await getTtsConf(env)).listenAll) return fail('الاستماع لمشتركي Premium', 403);
     const nid = str(url.searchParams.get('nid'), 80), ix = parseInt(url.searchParams.get('idx'), 10);
     const c = await env.DB.prepare('SELECT id,status,parts,done,nparts,secs,LENGTH(text) AS total FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
     if (!c) return json({ status: 'none' }, 200, { 'Cache-Control': 'no-store' });
@@ -1154,7 +1157,7 @@ async function route(request, env) {
     return json({ status: 'pending', done: c.done, n: c.nparts }, 200, { 'Cache-Control': 'no-store' });
   }
   if ((g = /^\/api\/tts\/part\/(\d+)\/(\d+)$/.exec(path)) && m === 'GET') {
-    if (!isPremium(user)) return fail('الاستماع لمشتركي Premium', 403);
+    if (!isPremium(user) && !(await getTtsConf(env)).listenAll) return fail('الاستماع لمشتركي Premium', 403);
     if (!env.TTS_BUCKET) return fail('التخزين مش متفعّل', 503);
     const o = await env.TTS_BUCKET.get('c/' + g[1] + '/' + g[2] + '.wav'); if (!o) return fail('الجزء مش موجود', 404);
     return audioResp(o, true);
@@ -1280,6 +1283,7 @@ async function route(request, env) {
     if (!row) return fail('الرواية غير موجودة', 404);
     const c = (await env.DB.prepare("SELECT COUNT(*) AS n FROM chapters WHERE novel_id=? AND ver='d'").bind(id).first()).n;
     if (!c) return fail('أضف فصل واحد على الأقل قبل الإرسال');
+    if (user.role === 'admin') return await route(new Request(new URL('/api/admin/novels/' + id + '/approve', request.url), { method: 'POST', headers: request.headers, body: '{}' }), env);
     await env.DB.prepare("UPDATE novels SET status='pending',reject_reason='',updated_at=? WHERE id=?").bind(Date.now(), id).run();
     await notifyAdmins(env, user.name, '📚 رواية جديدة مستنية مراجعتك', row.d_title, 'pend');
     return json({ ok: true });
@@ -1363,7 +1367,7 @@ async function route(request, env) {
       ROLES.forEach((r) => { const v = (ba.voices || {})[r]; if (v && typeof v === 'object') { const o = { ...cur.az.voices[r] }; if (/^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]{2,40}$/.test(String(v.v || ''))) o.v = String(v.v); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.rate || ''))) o.rate = String(v.rate); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.pitch || ''))) o.pitch = String(v.pitch); az.voices[r] = o; } });
       await setSetting(env, 'tts', { model: nm(b.model, cur.model), legacyModel: nm(b.legacyModel, cur.legacyModel), style: str(b.style, 200).trim() || cur.style, gv,
         concurrency: nu(b.concurrency, cur.concurrency, 1, 4), dailyMin: nu(b.dailyMin, cur.dailyMin, 0, 100000), freeMin: nu(b.freeMin, cur.freeMin, 0, 100000), priceIn: nu(b.priceIn, cur.priceIn, 0, 1000), priceOut: nu(b.priceOut, cur.priceOut, 0, 1000),
-        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, multi: b.multi == null ? cur.multi : !!b.multi, mm: b.mm == null ? cur.mm : !!b.mm, econ: b.econ == null ? cur.econ : !!b.econ, hideListen: b.hideListen == null ? cur.hideListen : !!b.hideListen, smart: b.smart == null ? cur.smart : !!b.smart, annModel: nm(b.annModel, cur.annModel), dict: b.dict == null ? cur.dict : String(b.dict).slice(0, 3000), az,
+        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, multi: b.multi == null ? cur.multi : !!b.multi, mm: b.mm == null ? cur.mm : !!b.mm, econ: b.econ == null ? cur.econ : !!b.econ, hideListen: b.hideListen == null ? cur.hideListen : !!b.hideListen, listenAll: b.listenAll == null ? cur.listenAll : !!b.listenAll, smart: b.smart == null ? cur.smart : !!b.smart, annModel: nm(b.annModel, cur.annModel), dict: b.dict == null ? cur.dict : String(b.dict).slice(0, 3000), az,
         g2: { dailyMin: nu((b.g2 || {}).dailyMin, cur.g2.dailyMin, 0, 100000), freeMin: nu((b.g2 || {}).freeMin, cur.g2.freeMin, 0, 100000), concurrency: nu((b.g2 || {}).concurrency, cur.g2.concurrency, 1, 4) },
         g3: { dailyMin: nu((b.g3 || {}).dailyMin, cur.g3.dailyMin, 0, 100000), freeMin: nu((b.g3 || {}).freeMin, cur.g3.freeMin, 0, 100000), concurrency: nu((b.g3 || {}).concurrency, cur.g3.concurrency, 1, 4) } });
       return json({ ok: true, ...(await ttsStats(env)) });
@@ -1575,6 +1579,32 @@ async function route(request, env) {
     }
     if (path === '/api/admin/contact' && m === 'GET') { const { results } = await env.DB.prepare('SELECT id,uid,name,email,kind,text,ts FROM contact ORDER BY ts DESC LIMIT 200').all(); return json({ items: results }); }
     if ((g = /^\/api\/admin\/contact\/(\d+)\/delete$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM contact WHERE id=?').bind(+g[1]).run(); return json({ ok: true }); }
+    if (path === '/api/admin/import/wattpad' && m === 'POST') {
+      const b = await body(request, 1000), u0 = str(b.url, 300), mm = /wattpad\.com\/(?:story\/)?(\d+)/.exec(u0);
+      if (!mm) return fail('لينك واتباد غير صحيح');
+      const H = { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36', Accept: 'application/json' };
+      let sid = mm[1];
+      if (!/wattpad\.com\/story\//.test(u0)) { const pr = await fetch('https://www.wattpad.com/api/v3/story_parts/' + sid + '?fields=group(id)', { headers: H }); if (pr.ok) { const pj = await pr.json(); if (pj && pj.group && pj.group.id) sid = String(pj.group.id); } }
+      const r = await fetch('https://www.wattpad.com/api/v3/stories/' + sid + '?fields=id,title,description,cover,user(name),parts(id,title)', { headers: H });
+      if (!r.ok) return fail('واتباد رفض الطلب (' + r.status + ') — ممكن الرواية خاصة أو واتباد حاجب السيرفر', 502);
+      const j = await r.json(); if (!j || !Array.isArray(j.parts) || !j.parts.length) return fail('مفيش فصول في اللينك ده', 404);
+      return json({ id: String(j.id), title: str(j.title, 200), author: str((j.user || {}).name, 100), synopsis: str(j.description, 3000), cover: str(j.cover, 500), parts: j.parts.map((x) => ({ id: String(x.id), title: str(x.title, 200) })) });
+    }
+    if (path === '/api/admin/import/wattpad/run' && m === 'POST') {
+      const b = await body(request, 20000), nid = +b.novelId, parts = Array.isArray(b.parts) ? b.parts.slice(0, 6) : [];
+      if (!nid || !parts.length || !(await env.DB.prepare('SELECT 1 AS x FROM novels WHERE id=? AND user_id=?').bind(nid, user.id).first())) return fail('بيانات غير صحيحة');
+      const dec = (t) => t.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
+      const texts = await Promise.all(parts.map(async (pt) => {
+        if (!/^\d{1,15}$/.test(String(pt.id))) return '';
+        try { const r = await fetch('https://www.wattpad.com/apiv2/storytext?id=' + pt.id, { headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 13) Chrome/120 Mobile Safari/537.36' } }); if (!r.ok) return ''; const h = await r.text();
+          return dec(h.replace(/<\s*br\s*\/?>/gi, '\n').replace(/<\/p>/gi, '\n\n').replace(/<[^>]+>/g, '')).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(); } catch (e) { return ''; }
+      }));
+      let idx = ((await env.DB.prepare("SELECT COALESCE(MAX(idx),-1) AS m FROM chapters WHERE novel_id=? AND ver='d'").bind(nid).first()) || {}).m + 1, ok = 0; const failed = [];
+      const st = [];
+      parts.forEach((pt, i) => { if (!texts[i]) { failed.push(i); return; } st.push(env.DB.prepare("INSERT INTO chapters (novel_id,ver,idx,title,content,locked) VALUES (?,?,?,?,?,0)").bind(nid, 'd', idx++, str(pt.title, 200) || ('الفصل ' + idx), texts[i])); ok++; });
+      if (st.length) await env.DB.batch(st);
+      return json({ ok, failed });
+    }
     if (path === '/api/admin/cmt' && m === 'GET') return json(await cmtConf(env));
     if (path === '/api/admin/cmt' && m === 'PUT') { const b = await body(request, 500), cur = await cmtConf(env); await setSetting(env, 'cmt', { perCh: b.perCh ?? cur.perCh, perDay: b.perDay ?? cur.perDay, pts: b.pts ?? cur.pts, minLen: b.minLen ?? cur.minLen, dayPts: b.dayPts ?? cur.dayPts, newsPerDay: b.newsPerDay ?? cur.newsPerDay }); return json({ ok: true, ...(await cmtConf(env)) }); }
     if (path === '/api/admin/news/pending' && m === 'GET') { const { results } = await env.DB.prepare("SELECT n.id,n.title,n.text,n.img,n.ts,n.author_uid AS auid,u.name AS author,u.avatar AS aavatar FROM news n LEFT JOIN users u ON u.id=n.author_uid WHERE n.status='pending' ORDER BY n.ts DESC LIMIT 50").all(); return json({ items: results }); }
