@@ -491,7 +491,10 @@ async function smartRoles(env, text, conf, ctx) {
 function applyDict(runs, conf) { // قاموس النطق: كلمة=كلمة بالتشكيل
   const pairs = String(conf.dict || '').split('\n').map((l) => { const k = l.indexOf('='); return k > 0 ? [l.slice(0, k).trim(), l.slice(k + 1).trim()] : null; }).filter((x) => x && x[0] && x[1]).sort((a, b) => b[0].length - a[0].length);
   if (!pairs.length) return runs;
-  return runs.map((r) => { let t = r.text; for (const [a, b] of pairs) t = t.split(a).join(b); return { role: r.role, text: t, emo: r.emo }; });
+  // الاستبدال بالكلمة الكاملة (مش جزء من كلمة تانية)، ومسموح حرف سابق (و/ف/ب/ل/ك) للكلمات الطويلة
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), L = '\\p{L}\\p{M}';
+  const rx = pairs.map(([a, b]) => [new RegExp('(?<![' + L + '])([وفبلك]?)(' + esc(a) + ')(?![' + L + '])', 'gu'), a, b]);
+  return runs.map((r) => { let t = r.text; for (const [re, a, b] of rx) t = t.replace(re, (m, p) => (p && a.length < 4 && p !== 'و' && p !== 'ف' ? m : p + b)); return { role: r.role, text: t, emo: r.emo }; });
 }
 // تقليل عدد الطلبات لجوجل (حدّها في الدقيقة قليل): الأجزاء القصيرة تتدمج في اللي جنبها، وبحد أقصى 4 طلبات للجزء
 function mergeRuns(runs, maxCalls, minLen = 45) {
