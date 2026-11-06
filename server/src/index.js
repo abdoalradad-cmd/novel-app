@@ -1670,6 +1670,16 @@ async function route(request, env) {
       const { results } = await env.DB.prepare('SELECT u.id,u.email,u.name,u.role,u.created_at,u.premium_until,u.last_ip,u.last_seen,(SELECT COUNT(*) FROM novels n WHERE n.user_id=u.id) AS novels FROM users u ORDER BY u.id DESC LIMIT 1000').all();
       return json({ users: results.map((u) => ({ id: u.id, email: u.email, name: u.name, role: u.role, createdAt: u.created_at, premiumUntil: u.premium_until || 0, premium: isPremium(u), novels: u.novels, lastIp: u.last_ip || '', lastSeen: u.last_seen || 0 })) });
     }
+    if ((g = /^\/api\/admin\/users\/(\d+)\/role$/.exec(path)) && m === 'POST') {
+      const b = await body(request, 200), role = b.role === 'admin' ? 'admin' : 'user', tid = +g[1];
+      const t = await env.DB.prepare('SELECT id,name,role FROM users WHERE id=?').bind(tid).first();
+      if (!t) return fail('المستخدم غير موجود', 404);
+      const owner = await env.DB.prepare("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").first();
+      if (role === 'user') { if (t.id === user.id) return fail('مينفعش تشيل الأدمن من نفسك'); if (owner && t.id === owner.id) return fail('ده الأدمن الأساسي ومينفعش يتشال', 403); }
+      await env.DB.prepare('UPDATE users SET role=? WHERE id=?').bind(role, tid).run();
+      await notifyUser(env, tid, role === 'admin' ? '🛡️ بقيت أدمن في RadPad' : 'اتشالت صلاحية الأدمن من حسابك', role === 'admin' ? 'سجّل خروج وادخل تاني علشان تظهر لك لوحة التحكم.' : '', 'role');
+      return json({ ok: true, role });
+    }
     if ((g = /^\/api\/admin\/users\/(\d+)\/reset$/.exec(path)) && m === 'POST') {
       const u = await env.DB.prepare('SELECT id,email FROM users WHERE id=?').bind(+g[1]).first();
       if (!u) return fail('المستخدم غير موجود', 404);
