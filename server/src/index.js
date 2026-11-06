@@ -672,10 +672,10 @@ async function ttsStep0(env, opts = {}) {
 async function ttsStats(env) {
   const conf = await getTtsConf(env), d = dayKey(), mo = d.slice(0, 7), pr = ttsPrices(conf);
   const sum = async (prov, where, ...a) => env.DB.prepare('SELECT COALESCE(SUM(reqs),0) AS reqs,COALESCE(SUM(chars),0) AS chars,COALESCE(SUM(secs),0) AS secs,COALESCE(SUM(cost),0) AS cost,COALESCE(SUM(fails),0) AS fails,COALESCE(SUM(limited),0) AS limited FROM tts_use WHERE prov=? AND ' + where).bind(prov, ...a).first();
-  const { results: novels } = await env.DB.prepare("SELECT nid,MAX(ntitle) AS title,MIN(ord) AS ord,MAX(prov) AS prov,COUNT(*) AS n,SUM(status='done') AS d,SUM(LENGTH(text)) AS chars,SUM(CASE WHEN status='done' THEN 0 ELSE LENGTH(text)*(1.0-done*1.0/(CASE WHEN nparts<1 THEN 1 ELSE nparts END)) END) AS rem FROM tts_ch GROUP BY nid ORDER BY MIN(ord),nid LIMIT 120").all();
+  const { results: novels } = await env.DB.prepare("SELECT nid,MAX(ntitle) AS title,MIN(ord) AS ord,MAX(prov) AS prov,COUNT(*) AS n,SUM(status='done') AS d,SUM(CASE WHEN status='running' AND lock_until>"+Date.now()+" THEN 1 ELSE 0 END) AS run,SUM(LENGTH(text)) AS chars,SUM(CASE WHEN status='done' THEN 0 ELSE LENGTH(text)*(1.0-done*1.0/(CASE WHEN nparts<1 THEN 1 ELSE nparts END)) END) AS rem FROM tts_ch GROUP BY nid ORDER BY MIN(ord),nid LIMIT 120").all();
   const q = await env.DB.prepare('SELECT prov,status,COUNT(*) AS n FROM tts_ch GROUP BY prov,status').all();
   const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { gemini: !!env.GEMINI_API_KEY, gemini2: !!env.GEMINI_API_KEY_2, gemini3: !!env.GEMINI_API_KEY_3, azure: !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)), azureKey: !!env.AZURE_SPEECH_KEY, azureRegion: azRegion(env, conf) }, prov: {}, prices: pr,
-    chapters: { queued: 0, running: 0, done: 0, failed: 0 }, novels: novels.map((r) => ({ nid: r.nid, title: r.title, ord: r.ord, prov: r.prov, n: r.n, d: r.d || 0, rem: Math.round(r.rem || 0) })) };
+    chapters: { queued: 0, running: 0, done: 0, failed: 0 }, novels: novels.map((r) => ({ nid: r.nid, title: r.title, ord: r.ord, prov: r.prov, n: r.n, d: r.d || 0, run: r.run || 0, rem: Math.round(r.rem || 0) })) };
   q.results.forEach((r) => (out.chapters[r.status] = (out.chapters[r.status] || 0) + r.n));
   out.hasKey = out.has.gemini;
   for (const prov of PROVS) {
@@ -1430,10 +1430,10 @@ async function route(request, env) {
         const nid = str(it.nid, 80), ix = parseInt(it.idx, 10), text = String(it.text || '').slice(0, 150000).trim(), sig = str(it.sig, 40);
         if (!nid || !(ix >= 0 && ix < 5000)) { skipped++; continue; }
         const parts = splitParts(text, conf.econ ? ECON_MX : 700); if (!parts.length) { skipped++; continue; }
-        const ntitle = str(it.ntitle, 120), ctitle = str(it.ctitle, 120), ord = Math.max(-1e9, Math.min(1e9, parseInt(it.ord, 10) || 0));
+        const ntitle = str(it.ntitle, 120), ctitle = str(it.ctitle, 120); let ord = Math.max(-1e9, Math.min(1e9, parseInt(it.ord, 10) || 0));
         const ex = await env.DB.prepare('SELECT id,sig,prov,text,nparts,status FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
-        const sib = await env.DB.prepare('SELECT prov FROM tts_ch WHERE nid=? LIMIT 1').bind(nid).first(), prov = conf.novelProv[nid] || (sib && sib.prov) || conf.defProv;
-        if (!ex) { await env.DB.prepare('INSERT INTO tts_ch (nid,idx,ntitle,ctitle,ord,sig,text,parts,nparts,created,updated,prov) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind(nid, ix, ntitle, ctitle, ord, sig, text, JSON.stringify(parts), parts.length, now, now, prov).run(); added++; }
+        const sib = await env.DB.prepare('SELECT prov,MIN(ord) AS o FROM tts_ch WHERE nid=?').bind(nid).first(), prov = conf.novelProv[nid] || (sib && sib.prov) || conf.defProv;
+        if (!ex) { if (sib && sib.o != null) ord = sib.o; await env.DB.prepare('INSERT INTO tts_ch (nid,idx,ntitle,ctitle,ord,sig,text,parts,nparts,created,updated,prov) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind(nid, ix, ntitle, ctitle, ord, sig, text, JSON.stringify(parts), parts.length, now, now, prov).run(); added++; }
         else if (ex.status === 'done' || (ex.sig === sig && !(hasMk(text) && !hasMk(ex.text)))) { await env.DB.prepare('UPDATE tts_ch SET ntitle=?,ctitle=? WHERE id=?').bind(ntitle, ctitle, ex.id).run(); skipped++; }
         else {
           if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < ex.nparts; i++) ks.push('c/' + ex.id + '/' + i + '.wav'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); } await env.DB.prepare("UPDATE tts_ch SET ntitle=?,ctitle=?,sig=?,text=?,parts=?,nparts=?,done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=?,prov=? WHERE id=?").bind(ntitle, ctitle, sig, text, JSON.stringify(parts), parts.length, now, prov, ex.id).run(); updated++; }
@@ -1444,6 +1444,18 @@ async function route(request, env) {
       const b = await body(request, 500), nid = str(b.nid, 80);
       const mn = await env.DB.prepare('SELECT COALESCE(MIN(ord),0) AS m FROM tts_ch').first();
       await env.DB.prepare('UPDATE tts_ch SET ord=? WHERE nid=?').bind(mn.m - 1, nid).run(); return json({ ok: true, ...(await ttsStats(env)) });
+    }
+    // ترتيب رواية برقم: pos = ترتيبها بين الروايات اللي لسه بتتحوّل
+    if (path === '/api/admin/tts/pos' && m === 'POST') {
+      const b = await body(request, 400), nid = str(b.nid, 80), pos = Math.max(1, parseInt(b.pos, 10) || 1);
+      const { results } = await env.DB.prepare("SELECT nid,MIN(ord) AS o,COUNT(*) AS n,SUM(status='done') AS d FROM tts_ch GROUP BY nid ORDER BY MIN(ord),nid").all();
+      const act = results.filter((r) => (r.d || 0) < r.n).map((r) => r.nid).filter((x) => x !== nid);
+      if (!results.some((r) => r.nid === nid)) return fail('الرواية مش موجودة', 404);
+      act.splice(Math.min(pos - 1, act.length), 0, nid);
+      const base = Math.min(0, ...results.map((r) => r.o || 0)) - act.length * 10 - 10;
+      const st = act.map((x, k) => env.DB.prepare('UPDATE tts_ch SET ord=? WHERE nid=?').bind(base + k * 10, x));
+      for (let i = 0; i < st.length; i += 40) await env.DB.batch(st.slice(i, i + 40));
+      return json({ ok: true, ...(await ttsStats(env)) });
     }
     if (path === '/api/admin/tts/remove' && m === 'POST') {
       const b = await body(request, 500), nid = str(b.nid, 80);
