@@ -299,7 +299,7 @@ const AZ_VOICES = { narrator: { v: 'ar-SA-HamedNeural', rate: '-4%', pitch: '0%'
   boy: { v: 'ar-EG-ShakirNeural', rate: '+6%', pitch: '+38%' }, girl: { v: 'ar-EG-SalmaNeural', rate: '+6%', pitch: '+30%' } };
 const TTS_DEFAULT = { model: 'gemini-3.8-flash-tts', legacyModel: 'gemini-2.5-flash-preview-tts', style: 'warm, expressive audiobook narration in natural Egyptian Arabic', concurrency: 2, dailyMin: 20, freeMin: 0, priceIn: 0, priceOut: 0,
   gv: G_VOICES, defProv: 'gemini', novelProv: {}, multi: true, az: { region: '', dailyMin: 30, freeChars: 500000, price: 15, concurrency: 3, voices: AZ_VOICES } };
-const PROVS = ['gemini', 'gemini2', 'gemini3', 'azure'];
+const PROVS = ['gemini', 'gemini2', 'gemini3', 'azure', 'voicetut']; // voicetut = تحويل خارجي (Colab) بيرفع الصوت الجاهز
 const normProv = (p) => (PROVS.includes(p) ? p : 'gemini');
 const isGem = (p) => p !== 'azure';
 // مفتاح جوجل لكل مزوّد (gemini2 / gemini3 = حساب جوجل تاني وتالت بمفاتيح مختلفة)
@@ -321,7 +321,7 @@ async function getTtsConf(env) {
     az: { region: /^[a-z0-9-]{3,30}$/.test(String(xa.region || '')) ? String(xa.region) : '', dailyMin: n(xa.dailyMin, 30, 0, 100000), freeChars: n(xa.freeChars, 500000, 0, 1e9), price: n(xa.price, 15, 0, 1000), concurrency: n(xa.concurrency, 3, 1, 8), voices } };
 }
 const azRegion = (env, conf) => conf.az.region || String(env.AZURE_SPEECH_REGION || '').trim().toLowerCase();
-const provReady = (env, conf, prov) => !!env.TTS_BUCKET && (prov === 'azure' ? !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)) : !!gemKey(env, prov));
+const provReady = (env, conf, prov) => !!env.TTS_BUCKET && (prov === 'voicetut' || prov === 'azure' ? !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)) : !!gemKey(env, prov));
 function ttsPrices(conf, now = Date.now()) { const late = now >= Date.UTC(2027, 0, 1); return { inP: conf.priceIn || (late ? 1 : 0.5), outP: conf.priceOut || (late ? 18 : 9) }; }
 function ttsCost(chars, secs, conf) { const p = ttsPrices(conf); return (Math.ceil(chars / 2.5) * p.inP + secs * 25 * p.outP) / 1e6; }
 const dayKey = (t = Date.now()) => new Date(t + 2 * 3600000).toISOString().slice(0, 10); // بتوقيت مصر تقريبًا
@@ -497,10 +497,12 @@ function applyDict(runs, conf) { // قاموس النطق: كلمة=كلمة ب�
   return runs.map((r) => { let t = r.text; for (const [re, a, b] of rx) t = t.replace(re, (m, p) => (p && a.length < 4 && p !== 'و' && p !== 'ف' ? m : p + b)); return { role: r.role, text: t, emo: r.emo }; });
 }
 // تقليل عدد الطلبات لجوجل (حدّها في الدقيقة قليل): الأجزاء القصيرة تتدمج في اللي جنبها، وبحد أقصى 4 طلبات للجزء
+// لما بندمج أجزاء بانفعالات مختلفة منحافظش على الانفعال بتاع كل جزء جوه النص نفسه: [بغضب] كلام... [بهمس] كلام...
+const cueTxt = (r) => (r.emo ? '[' + r.emo + '] ' : '') + r.text;
+const joinCue = (a, b) => ((a.emo || a.tg || b.emo || b.tg) ? { text: (a.tg ? a.text : cueTxt(a)) + ' ' + (b.tg ? b.text : cueTxt(b)), emo: '', tg: true } : { text: a.text + ' ' + b.text, emo: '', tg: false });
 function mergeRuns(runs, maxCalls, minLen = 45) {
   const out = runs.map((r) => ({ role: r.role, text: r.text, emo: r.emo }));
-  const join = (i, j) => { out[j].text = i < j ? out[i].text + ' ' + out[j].text : out[j].text + ' ' + out[i].text; if (!out[j].emo) out[j].emo = out[i].emo; out.splice(i, 1); };
-  const fold = () => { for (let k = out.length - 1; k > 0; k--) if (out[k].role === out[k - 1].role) { out[k - 1].text += ' ' + out[k].text; if (!out[k - 1].emo) out[k - 1].emo = out[k].emo; out.splice(k, 1); } };
+  const fold = () => { for (let k = out.length - 1; k > 0; k--) if (out[k].role === out[k - 1].role) { const j = joinCue(out[k - 1], out[k]); out[k - 1] = { role: out[k].role, text: j.text, emo: j.emo, tg: j.tg }; out.splice(k, 1); } };
   fold();
   for (;;) {
     let idx = -1, best = 1e9;
@@ -510,8 +512,8 @@ function mergeRuns(runs, maxCalls, minLen = 45) {
     // الدور الأطول هو اللي بيفضل
     const keep = out[nb].text.length >= r.text.length ? nb : idx; const other = keep === nb ? idx : nb;
     const first = Math.min(idx, nb), second = Math.max(idx, nb);
-    const txt = out[first].text + ' ' + out[second].text, role = out[keep].role;
-    out.splice(second, 1); out[first] = { role, text: txt }; fold();
+    const jc = joinCue(out[first], out[second]), role = out[keep].role;
+    out.splice(second, 1); out[first] = { role, text: jc.text, emo: jc.emo, tg: jc.tg }; fold();
     if (out.length <= 1) break;
   }
   return out;
@@ -521,8 +523,8 @@ async function geminiPart(env, text, conf, ctx) { // جزء واحد: أدوار
   for (const r of runs) { if (!cur || (!cur.roles.has(r.role) && cur.roles.size >= (conf.mm ? 2 : 1))) { cur = { roles: new Set(), items: [] }; groups.push(cur); } cur.roles.add(r.role); cur.items.push(r); }
   const wavs = new Array(groups.length); let chars = 0, nxt = 0;
   groups.forEach((g) => { chars += g.items.map((x) => x.text).join(' ').length; });
-  const one = async (i) => { const g = groups[i], roles = [...g.roles], t = g.items.map((x) => x.text).join(' ');
-    wavs[i] = roles.length === 1 ? await geminiSpeak(env, t, conf.gv[roles[0]], conf, roleStyle(conf, roles[0], g.items.map((it) => it.emo).filter(Boolean)[0])) : await geminiMulti(env, roles[0], roles[1], g.items, conf); };
+  const one = async (i) => { const g = groups[i], roles = [...g.roles], tgs = g.items.some((x) => x.tg), t = g.items.length > 1 ? g.items.map((x) => (x.tg ? x.text : cueTxt(x))).join(' ') : g.items[0].text;
+    wavs[i] = roles.length === 1 ? await geminiSpeak(env, t, conf.gv[roles[0]], conf, roleStyle(conf, roles[0], g.items.length === 1 && !tgs ? g.items[0].emo : '') + ((tgs || g.items.length > 1) ? '. The text has square-bracket cues: act each cue out exactly with that feeling for the sentences after it, and never read the cue aloud' : '')) : await geminiMulti(env, roles[0], roles[1], g.items, conf); };
   // الأجزاء الصغيرة (الأدوار) بتتحوّل بالتوازي (3 مع بعض) علشان الجزء يخلص قبل ما الوقت يخلص
   await Promise.all(Array.from({ length: Math.min(3, groups.length) }, async () => { while (nxt < groups.length) { const i = nxt++; await one(i); } }));
   const wav = joinWavs(wavs); return { wav, chars, calls: groups.length };
@@ -581,7 +583,7 @@ async function ttsBump(env, prov, cols) {
   const sets = Object.keys(cols).map((k) => k + '=' + k + '+?').join(',');
   await env.DB.prepare('UPDATE tts_use SET ' + sets + ' WHERE day=? AND prov=?').bind(...Object.values(cols), d, prov).run();
 }
-const stKey = (prov) => (prov === 'azure' ? 'tts_state_az' : prov === 'gemini2' ? 'tts_state_g2' : prov === 'gemini3' ? 'tts_state_g3' : 'tts_state');
+const stKey = (prov) => (prov === 'voicetut' ? 'tts_state_vt' : prov === 'azure' ? 'tts_state_az' : prov === 'gemini2' ? 'tts_state_g2' : prov === 'gemini3' ? 'tts_state_g3' : 'tts_state');
 const PNAME = { gemini: 'جوجل (Gemini)', gemini2: 'جوجل (Gemini 2)', gemini3: 'جوجل (Gemini 3)', azure: 'مايكروسوفت (Azure)' };
 async function ttsAlertAdmins(env, title, text, prov = 'gemini') {
   const key = stKey(prov), st = await getSetting(env, key), now = Date.now();
@@ -620,6 +622,7 @@ async function ttsStep(env, opts = {}) {
 }
 async function ttsStep0(env, opts = {}) {
   const prov = normProv(opts.prov), conf = await getTtsConf(env);
+  if (prov === 'voicetut') return { ok: true, idle: 'external', prov };
   if (!provReady(env, conf, prov)) return { ok: false, idle: 'not_configured', prov };
   const now = Date.now(), key = stKey(prov), st = await getSetting(env, key);
   if (st.pausedUntil && st.pausedUntil > now && !opts.force) return { ok: true, idle: 'paused', prov };
@@ -946,8 +949,13 @@ async function route(request, env) {
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return fail('الإيميل غير صحيح');
     await noteAttempt(env, 'ct:' + ip);
     let uid = 0; const hm = /^Bearer (.+)$/.exec(request.headers.get('Authorization') || ''); if (hm) { try { const tp = await readToken(env, hm[1]); if (tp && tp.uid) uid = +tp.uid || 0; } catch (e) {} }
-    await env.DB.prepare('INSERT INTO contact (uid,name,email,kind,text,ts) VALUES (?,?,?,?,?,?)').bind(uid, name, email, kind, text, Date.now()).run();
-    await env.DB.prepare('DELETE FROM contact WHERE id NOT IN (SELECT id FROM contact ORDER BY ts DESC LIMIT 500)').run();
+    const insC = () => env.DB.prepare('INSERT INTO contact (uid,name,email,kind,text,ts) VALUES (?,?,?,?,?,?)').bind(uid, name, email, kind, text, Date.now()).run();
+    try { await insC(); } catch (e) {
+      // جدول قديم/ناقص: نكمّل الأعمدة الناقصة ونعيد المحاولة
+      for (const col of ["uid INTEGER NOT NULL DEFAULT 0", "name TEXT NOT NULL DEFAULT ''", "email TEXT NOT NULL DEFAULT ''", "kind TEXT NOT NULL DEFAULT ''", "text TEXT NOT NULL DEFAULT ''", "ts INTEGER NOT NULL DEFAULT 0"]) { try { await env.DB.prepare('ALTER TABLE contact ADD COLUMN ' + col).run(); } catch (e2) {} }
+      try { await insC(); } catch (e3) { return fail('تعذّر حفظ الرسالة: ' + String(e3 && e3.message || e3).slice(0, 120), 500); }
+    }
+    try { await env.DB.prepare('DELETE FROM contact WHERE id NOT IN (SELECT id FROM contact ORDER BY ts DESC LIMIT 500)').run(); } catch (e) {}
     await notifyAdmins(env, name || 'زائر', '📨 رسالة جديدة: ' + kinds[kind], text.slice(0, 120), 'msgs');
     return json({ ok: true });
   }
@@ -1475,6 +1483,39 @@ async function route(request, env) {
         await env.DB.prepare("UPDATE tts_ch SET prov=?,sig='',done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=? WHERE nid=?").bind(prov, Date.now(), nid).run();
       }
       return json({ ok: true, ...(await ttsStats(env)) });
+    }
+    // ===== تحويل خارجي (VoiceTuT على Colab): السيرفر بيدّي الفصول والأجزاء ويستقبل الصوت الجاهز =====
+    if (path === '/api/admin/tts/ext/jobs' && m === 'GET') {
+      const lim = Math.max(1, Math.min(20, parseInt(url.searchParams.get('limit'), 10) || 5)), conf = await getTtsConf(env);
+      const { results } = await env.DB.prepare("SELECT id,nid,idx,ntitle,ctitle,text,parts FROM tts_ch WHERE prov='voicetut' AND status!='done' ORDER BY ord ASC,nid ASC,idx ASC LIMIT ?").bind(lim).all();
+      const jobs = results.map((c) => { const ps = JSON.parse(c.parts || '[]'); return { id: c.id, nid: c.nid, idx: c.idx, novel: c.ntitle, chapter: c.ctitle, n: ps.length, parts: ps.map((p, i) => ({ i, text: applyDict([{ role: 'narrator', text: stripMarks(c.text.slice(p[0], p[1]).trim()) }], conf)[0].text })) }; });
+      const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM tts_ch WHERE prov='voicetut' AND status!='done'").first();
+      return json({ jobs, left: left ? left.n : 0 });
+    }
+    if (path === '/api/admin/tts/ext/part' && m === 'POST') {
+      if (!env.TTS_BUCKET) return fail('التخزين مش متفعّل', 503);
+      const id = parseInt(url.searchParams.get('id'), 10), i = parseInt(url.searchParams.get('i'), 10);
+      const c = await env.DB.prepare("SELECT id,nparts,prov FROM tts_ch WHERE id=?").bind(id).first();
+      if (!c || c.prov !== 'voicetut') return fail('الفصل مش موجود أو مش على VoiceTuT', 404);
+      if (!(i >= 0 && i < c.nparts)) return fail('رقم الجزء غلط');
+      const buf = new Uint8Array(await request.arrayBuffer());
+      if (buf.length < 100 || buf.length > 40e6 || String.fromCharCode(buf[0], buf[1], buf[2], buf[3]) !== 'RIFF') return fail('الملف لازم يكون WAV صحيح');
+      await env.TTS_BUCKET.put('c/' + id + '/' + i + '.wav', buf, { httpMetadata: { contentType: 'audio/wav' } });
+      return json({ ok: true, bytes: buf.length });
+    }
+    if (path === '/api/admin/tts/ext/finish' && m === 'POST') {
+      const b = await body(request, 200), id = parseInt(b.id, 10);
+      const c = await env.DB.prepare("SELECT id,nparts,prov FROM tts_ch WHERE id=?").bind(id).first();
+      if (!c || c.prov !== 'voicetut') return fail('الفصل مش موجود أو مش على VoiceTuT', 404);
+      let secs = 0;
+      for (let i = 0; i < c.nparts; i++) {
+        const o = await env.TTS_BUCKET.get('c/' + id + '/' + i + '.wav', { range: { offset: 0, length: 64 } });
+        if (!o) return fail('ناقص الجزء رقم ' + i);
+        const hd = new DataView(await o.arrayBuffer()), br = hd.byteLength >= 32 ? hd.getUint32(28, true) : 48000, size = (await env.TTS_BUCKET.head('c/' + id + '/' + i + '.wav')).size;
+        secs += Math.max(0, size - 44) / (br || 48000);
+      }
+      await env.DB.prepare("UPDATE tts_ch SET status='done',done=?,secs=?,err='',owner='',lock_until=0,updated=? WHERE id=?").bind(c.nparts, secs, Date.now(), id).run();
+      return json({ ok: true, secs });
     }
     if (path === '/api/admin/tts/retry' && m === 'POST') {
       const b = await body(request, 300).catch(() => ({})), pv = PROVS.includes(b.prov) ? b.prov : null;
