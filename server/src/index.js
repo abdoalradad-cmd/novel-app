@@ -203,6 +203,7 @@ function cleanNovel(b) {
   const extra = { subtitle: str(b.subtitle, LIM.subtitle).trim(), novelStatus: b.novelStatus === 'مكتملة' ? 'مكتملة' : 'مستمرة',
     promoUrl: cleanUrl(b.promoUrl), pdfUrl: cleanUrl(b.pdfUrl), grad: GRADS.includes(b.grad) ? b.grad : GRADS[0],
     icon: ICONS.includes(b.icon) ? b.icon : 'fa-book', allowSharing: b.allowSharing !== false, paper: !!b.paper, password, lockAll, lockPdf: b.lockPdf !== false };
+  if (b.siteId) extra.siteId = str(b.siteId, 80);
   extra.price = (lockAll || anyLocked || extra.pdfUrl) ? cleanPrice(b.price) : 0; extra.oldPrice = extra.price && cleanPrice(b.oldPrice) > extra.price ? cleanPrice(b.oldPrice) : 0;
   return { title, author: str(b.author, LIM.author).trim(), genre: str(b.genre, LIM.genre).trim() || 'عام',
     tags, synopsis: str(b.synopsis, LIM.synopsis), cover: cleanUrl(b.cover), extra: JSON.stringify(extra), chapters: chs };
@@ -224,11 +225,38 @@ function chapterStmts(env, id, ver, chs) {
   const ins = chs.map((c, i) => env.DB.prepare('INSERT INTO chapters (novel_id,ver,idx,title,content,locked) VALUES (?,?,?,?,?,?)').bind(id, ver, i, c.title, c.content, c.locked ? 1 : 0));
   return [del, ...ins];
 }
+
+/* مفاتيح المشترين لرواية موقع (نسخة السيرفر) — السيرفر هو المصدر: n = باسورد الرواية كلها، p = الـ PDF، c = فصول مقفولة */
+function vaultEntryOf(x, chs) {
+  const pw = x.password || '', e = { n: '', p: '', c: {} };
+  if (!pw) return null;
+  if (x.lockAll) e.n = pw;
+  if (x.pdfUrl && x.lockPdf !== false) e.p = pw;
+  if (!x.lockAll) (chs || []).forEach((c, i) => { if (c.locked) e.c[i] = pw; });
+  return (e.n || e.p || Object.keys(e.c).length) ? e : null;
+}
+async function serverVault(env) {
+  const out = {};
+  const { results } = await env.DB.prepare("SELECT id,l_extra FROM novels WHERE is_live=1 AND l_extra LIKE '%\"siteId\"%'").all();
+  for (const r of results) {
+    const x = extraOf(r.l_extra); if (!x.siteId) continue;
+    const { results: cs } = await env.DB.prepare("SELECT locked FROM chapters WHERE novel_id=? AND ver='l' ORDER BY idx").bind(r.id).all();
+    const e = vaultEntryOf(x, cs.map((c) => ({ locked: !!c.locked })));
+    out[x.siteId] = e || { n: '', p: '', c: {} };
+  }
+  return out;
+}
+async function applyServerVault(env) {
+  const sv = await serverVault(env); if (!Object.keys(sv).length) return;
+  const v = await getSetting(env, 'vault'), keys = { ...(v.keys || {}) };
+  Object.keys(sv).forEach((id) => { if (sv[id].n || sv[id].p || Object.keys(sv[id].c).length) keys[id] = sv[id]; else delete keys[id]; });
+  await setSetting(env, 'vault', { keys, at: Date.now() });
+}
 const cleanPrice = (v) => { const n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.]/g, '')); return n > 0 && n <= 100000 ? Math.round(n * 100) / 100 : 0; };
 function extraOf(raw) {
   const x = parseJson(raw);
   return { subtitle: x.subtitle || '', novelStatus: x.novelStatus || 'مستمرة', promoUrl: x.promoUrl || '', pdfUrl: x.pdfUrl || '', grad: GRADS.includes(x.grad) ? x.grad : GRADS[0],
-    icon: ICONS.includes(x.icon) ? x.icon : 'fa-book', allowSharing: x.allowSharing !== false, paper: !!x.paper, password: x.password || '', lockAll: !!x.lockAll, lockPdf: x.lockPdf !== false, price: cleanPrice(x.price), oldPrice: cleanPrice(x.oldPrice) };
+    icon: ICONS.includes(x.icon) ? x.icon : 'fa-book', allowSharing: x.allowSharing !== false, paper: !!x.paper, password: x.password || '', lockAll: !!x.lockAll, lockPdf: x.lockPdf !== false, price: cleanPrice(x.price), oldPrice: cleanPrice(x.oldPrice), siteId: x.siteId || '' };
 }
 function myNovelRow(r) {
   return { id: r.id, status: r.status, isLive: !!r.is_live, hidden: !!r.hidden, rejectReason: r.reject_reason, updatedAt: r.updated_at, publishedAt: r.published_at,
@@ -1287,6 +1315,7 @@ async function route(request, env) {
     }
     if (m === 'PUT') {
       const n = cleanNovel(await body(request));
+      { const sid = parseJson(row.d_extra).siteId; if (sid) { const ex1 = JSON.parse(n.extra); ex1.siteId = sid; n.extra = JSON.stringify(ex1); } }
       await env.DB.batch([
         env.DB.prepare("UPDATE novels SET d_title=?,d_author=?,d_genre=?,d_tags=?,d_synopsis=?,d_cover=?,d_extra=?,updated_at=?,status=CASE WHEN status='pending' THEN 'pending' ELSE 'draft' END WHERE id=?")
           .bind(n.title, n.author || user.name, n.genre, JSON.stringify(n.tags), n.synopsis, n.cover, n.extra, Date.now(), id),
@@ -1361,6 +1390,7 @@ async function route(request, env) {
         env.DB.prepare('UPDATE novels SET l_title=d_title,l_author=d_author,l_genre=d_genre,l_tags=d_tags,l_synopsis=d_synopsis,l_cover=d_cover,l_extra=d_extra,is_live=1,status=?,reject_reason=?,published_at=COALESCE(published_at,?),updated_at=? WHERE id=?').bind('approved', '', now, now, id),
         env.DB.prepare("DELETE FROM chapters WHERE novel_id=? AND ver='l'").bind(id),
         env.DB.prepare("INSERT INTO chapters (novel_id,ver,idx,title,content,locked) SELECT novel_id,'l',idx,title,content,locked FROM chapters WHERE novel_id=? AND ver='d'").bind(id)]);
+      try { if (extraOf(r.d_extra).siteId) await applyServerVault(env); } catch (e) {}
       try {
         const newCnt = (await env.DB.prepare("SELECT COUNT(*) AS n FROM chapters WHERE novel_id=? AND ver='l'").bind(id).first()).n;
         const kind = !r.is_live ? 'novel' : (newCnt > oldCnt ? 'chapter' : '');
@@ -1653,6 +1683,27 @@ async function route(request, env) {
         plans: b.plans ? cleanPlans(b.plans) : old0.plans, methods: b.methods ? cleanMethods(b.methods, b.whatsapp) : old0.methods, features: Array.isArray(b.features) ? cleanFeatures(b.features) : old0.features });
       return json({ ok: true, info: await getPremiumInfo(env) });
     }
+    if (path === '/api/admin/site-novels/import' && m === 'POST') {
+      const b = await body(request), n = cleanNovel(b), sid = str(b.siteId, 80).trim();
+      if (!sid) return fail('معرّف رواية الموقع ناقص');
+      const ex = await env.DB.prepare("SELECT id,user_id FROM novels WHERE d_extra LIKE ?").bind('%"siteId":"' + sid.replace(/[%_"\\]/g, '') + '"%').first();
+      const x = JSON.parse(n.extra); x.siteId = sid; const extra = JSON.stringify(x), now = Date.now(), tags = JSON.stringify(n.tags);
+      let id;
+      if (ex && extraOf((await env.DB.prepare('SELECT d_extra FROM novels WHERE id=?').bind(ex.id).first()).d_extra).siteId === sid) {
+        id = ex.id;
+        await env.DB.batch([
+          env.DB.prepare("UPDATE novels SET d_title=?,d_author=?,d_genre=?,d_tags=?,d_synopsis=?,d_cover=?,d_extra=?,l_title=?,l_author=?,l_genre=?,l_tags=?,l_synopsis=?,l_cover=?,l_extra=?,is_live=1,status='approved',updated_at=? WHERE id=?")
+            .bind(n.title, n.author || user.name, n.genre, tags, n.synopsis, n.cover, extra, n.title, n.author || user.name, n.genre, tags, n.synopsis, n.cover, extra, now, id),
+          ...chapterStmts(env, id, 'd', n.chapters), ...chapterStmts(env, id, 'l', n.chapters)]);
+      } else {
+        const r = await env.DB.prepare("INSERT INTO novels (user_id,status,is_live,hidden,created_at,updated_at,published_at,d_title,d_author,d_genre,d_tags,d_synopsis,d_cover,d_extra,l_title,l_author,l_genre,l_tags,l_synopsis,l_cover,l_extra) VALUES (?,?,1,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+          .bind(user.id, 'approved', now, now, now, n.title, n.author || user.name, n.genre, tags, n.synopsis, n.cover, extra, n.title, n.author || user.name, n.genre, tags, n.synopsis, n.cover, extra).run();
+        id = r.meta.last_row_id;
+        await env.DB.batch([...chapterStmts(env, id, 'd', n.chapters), ...chapterStmts(env, id, 'l', n.chapters)]);
+      }
+      try { await applyServerVault(env); } catch (e) {}
+      return json({ ok: true, id, chapters: n.chapters.length });
+    }
     if (path === '/api/admin/vault' && m === 'PUT') {
       const b = await body(request, 2000000), keys = {};
       Object.keys(b.keys || {}).slice(0, 2000).forEach((id) => {
@@ -1661,6 +1712,7 @@ async function route(request, env) {
         keys[str(id, 60)] = { n: str(k.n, 80), p: str(k.p, 80), c };
       });
       await setSetting(env, 'vault', { keys, at: Date.now() });
+      try { await applyServerVault(env); } catch (e) {}
       return json({ ok: true, count: Object.keys(keys).length });
     }
     if (path === '/api/admin/contact' && m === 'GET') { const { results } = await env.DB.prepare('SELECT id,uid,name,email,kind,text,ts FROM contact ORDER BY ts DESC LIMIT 200').all(); return json({ items: results }); }
