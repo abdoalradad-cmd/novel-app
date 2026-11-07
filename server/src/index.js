@@ -897,7 +897,7 @@ async function route(request, env) {
   if (path === '/api/reads' && m === 'GET') {
     const { results } = await env.DB.prepare('SELECT k,n FROM reads ORDER BY n DESC LIMIT 1000').all();
     const o = {}; results.forEach((r) => { o[r.k] = r.n; });
-    return json({ reads: o }, 200, { 'Cache-Control': 'public, max-age=20' });
+    return json({ reads: o, epoch: ((await getSetting(env, 'reads_epoch')) || {}).t || 0 }, 200, { 'Cache-Control': 'public, max-age=20' });
   }
   if (path === '/api/reads' && m === 'POST') {
     const b = await body(request, 2000), k = str(b.k, 60), ch = Number.isInteger(+b.ch) ? Math.max(0, Math.min(9999, +b.ch)) : -1;
@@ -1568,6 +1568,15 @@ async function route(request, env) {
       return json({ prize: pts.prize || 0, start: pts.start || '', week: weekStart(), nextDraw: weekEndMs(weekStart()), top, draws });
     }
     if (path === '/api/admin/points' && m === 'PUT') { const b = await body(request, 300), pts = await getSetting(env, 'pts'); await setSetting(env, 'pts', { ...pts, prize: Math.max(0, Math.min(1e7, Number(b.prize) || 0)) }); return json({ ok: true }); }
+    if (path === '/api/admin/reads/reset' && m === 'POST') {
+      const b = await body(request, 500);
+      if (b.confirm !== 'RESET') return fail('لازم تأكيد');
+      const c1 = await env.DB.prepare('SELECT COALESCE(SUM(n),0) AS s FROM reads').first();
+      await env.DB.prepare('DELETE FROM reads').run();
+      await env.DB.prepare('DELETE FROM read_seen').run();
+      await setSetting(env, 'reads_epoch', { t: Date.now() });
+      return json({ ok: true, cleared: (c1 && c1.s) || 0 });
+    }
     if (path === '/api/admin/points/draw' && m === 'POST') return json({ ok: true, ...(await ptsDraw(env, true)) });
     if (path === '/api/admin/nprices' && m === 'PUT') {
       const b = await body(request, 300000); await setSetting(env, 'nprices', { prices: cleanNovelPrices(b.prices) });
