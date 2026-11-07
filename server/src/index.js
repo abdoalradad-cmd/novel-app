@@ -1468,9 +1468,12 @@ async function route(request, env) {
     }
     // ترتيب رواية برقم: pos = ترتيبها بين الروايات اللي لسه بتتحوّل
     if (path === '/api/admin/tts/key' && m === 'POST') {
-      const b = await body(request, 400), prov = b.prov, key = String(b.key || '').trim();
+      const b = await body(request, 2000), prov = b.prov;
+      // تنضيف اللصق: مسافات/أسطر/رموز مخفية/علامات تنصيص/كلمة key= أو Bearer
+      let key = String(b.key || '').normalize('NFKC').replace(/[\s\u200B-\u200F\u202A-\u202E\u2060\uFEFF"'`<>]/g, '').replace(/^(bearer|key=|apikey=|api_key=|x-goog-api-key:)/i, '');
+      const am = /AIza[A-Za-z0-9_-]{30,60}/.exec(key); if (am) key = am[0];
       if (!PROVS.includes(prov) || prov === 'azure') return fail('حساب جوجل غير صحيح');
-      if (key && !/^[A-Za-z0-9_-]{20,140}$/.test(key)) return fail('المفتاح شكله غلط — انسخه كامل من Google AI Studio');
+      if (key && !/^[A-Za-z0-9_.-]{20,140}$/.test(key)) return fail('المفتاح شكله غلط (طوله ' + key.length + ' وفيه رموز غريبة) — انسخه كامل من Google AI Studio');
       const cur = await getSetting(env, 'tts_keys'); if (key) cur[prov] = key; else delete cur[prov];
       await setSetting(env, 'tts_keys', cur); KC = { at: 0, v: null };
       return json({ ok: true, ...(await ttsStats(await withKeys(env.__base || env))) });
