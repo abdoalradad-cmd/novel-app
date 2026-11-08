@@ -349,7 +349,7 @@ async function getTtsConf(env) {
   const np = {}; Object.keys(x.novelProv || {}).slice(0, 2000).forEach((k) => { if (PROVS.includes(x.novelProv[k])) np[k] = x.novelProv[k]; });
   return { mm: x.mm !== false, model: x.model || TTS_DEFAULT.model, legacyModel: x.legacyModel || TTS_DEFAULT.legacyModel, style: x.style || TTS_DEFAULT.style, gv,
     concurrency: n(x.concurrency, TTS_DEFAULT.concurrency, 1, 4), dailyMin: n(x.dailyMin, TTS_DEFAULT.dailyMin, 0, 100000), freeMin: n(x.freeMin, 0, 0, 100000), priceIn: n(x.priceIn, 0, 0, 1000), priceOut: n(x.priceOut, 0, 0, 1000),
-    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false, smart: x.smart !== false, econ: x.econ !== false, hideListen: x.hideListen === true, listenAll: x.listenAll === true, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
+    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false, smart: x.smart !== false, econ: x.econ !== false, hideListen: x.hideListen === true, listenAll: x.listenAll === true, rebalance: x.rebalance !== false, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
     g2: { dailyMin: n((x.g2 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g2 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g2 || {}).concurrency, 2, 1, 4) },
     g3: { dailyMin: n((x.g3 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g3 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g3 || {}).concurrency, 2, 1, 4) },
     g4: { dailyMin: n((x.g4 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g4 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g4 || {}).concurrency, 2, 1, 4) },
@@ -658,6 +658,41 @@ async function ttsWipeNovel(env, nid) { // مسح الصوت المتخزّن ل
   if (env.TTS_BUCKET) for (const c of results) { const keys = []; for (let i = 0; i < c.nparts; i++) keys.push('c/' + c.id + '/' + i + '.wav'); for (let i = 0; i < keys.length; i += 100) await env.TTS_BUCKET.delete(keys.slice(i, i + 100)); }
 }
 // خطوة تحويل واحدة لمزوّد واحد: بتاخد أول فصل في طابوره (بالترتيب) وتولّد منه كام جزء، بشرط الحد اليومي. بتتنادى كل دقيقة من Cron.
+/* توزيع تلقائي: أي حساب طابوره فضي (وجاهز) بياخد رواية أو اتنين لسه ما اتبدأتش من طوابير الحسابات التانية */
+async function ttsRebalance(env, per = 2) {
+  const conf = await getTtsConf(env); if (conf.rebalance === false) return [];
+  const { results } = await env.DB.prepare("SELECT nid,MAX(prov) AS prov,MIN(ord) AS o,COUNT(*) AS n,SUM(status='done') AS d,SUM(status='running') AS r,SUM(status IN ('queued','running')) AS pend FROM tts_ch GROUP BY nid").all();
+  if (!results.length) return [];
+  const now = Date.now(), pend = {}, paused = {};
+  for (const p of PROVS) { pend[p] = 0; const st = await getSetting(env, stKey(p)); paused[p] = (st.pausedUntil || 0) > now; }
+  results.forEach((r) => { pend[r.prov] = (pend[r.prov] || 0) + (r.pend || 0); });
+  const idle = PROVS.filter((p) => pend[p] === 0 && !paused[p] && provReady(env, conf, p) && provCap(conf, p) > 0);
+  const moved = [];
+  for (const to of idle) {
+    let got = 0;
+    for (let k = 0; k < per; k++) {
+      // المتبرّع = الحساب اللي عنده أكتر روايات لسه ما اتبدأتش
+      const cand = {};
+      results.filter((r) => r.prov !== to && !r.moved && (r.d || 0) === 0 && !(r.r > 0) && r.pend > 0).forEach((r) => { (cand[r.prov] = cand[r.prov] || []).push(r); });
+      let best = null;
+      for (const pv of Object.keys(cand)) {
+        const list = cand[pv].sort((a, b) => a.o - b.o);
+        const all = results.filter((r) => r.prov === pv && r.pend > 0 && !r.moved).sort((a, b) => a.o - b.o);
+        // متخدش الرواية اللي هتبدأ دلوقتي في طابور الحساب التاني (الأولى) إلا لو الحساب ده واقف/مش جاهز
+        const front = all[0], donorOk = provReady(env, conf, pv) && !paused[pv];
+        const pool = donorOk ? list.filter((r) => r !== front) : list;
+        if (pool.length && (!best || pool.length > best.pool.length)) best = { pv, pool };
+      }
+      if (!best) break;
+      const pick = best.pool[best.pool.length - 1]; // آخر واحدة في طابورهم
+      const maxo = (await env.DB.prepare('SELECT COALESCE(MAX(ord),0) AS m FROM tts_ch WHERE prov=?').bind(to).first()).m;
+      await env.DB.prepare("UPDATE tts_ch SET prov=?,ord=? WHERE nid=? AND status!='done'").bind(to, maxo + 10, pick.nid).run();
+      const raw = await getSetting(env, 'tts'); await setSetting(env, 'tts', { ...raw, novelProv: { ...(raw.novelProv || {}), [pick.nid]: to } });
+      pick.moved = true; moved.push({ nid: pick.nid, from: best.pv, to }); got++;
+    }
+  }
+  return moved;
+}
 async function ttsStep(env, opts = {}) {
   const prov0 = normProv(opts.prov), t00 = Date.now(); let res, ex;
   try { res = await ttsStep0(env, opts); } catch (e) { ex = e; }
@@ -842,7 +877,7 @@ export default {
   },
   // كل دقيقة: يكمّل تحويل الفصول في الطابور (بحد يومي)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureSchema(env); env = await withKeys(env); try { await ptsTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM notes WHERE ts<?').bind(Date.now() - 30 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM visits WHERE day<?').bind(dayKey(Date.now() - 45 * 86400000)).run(); await env.DB.prepare('DELETE FROM presence WHERE seen<?').bind(Date.now() - 2 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureSchema(env); env = await withKeys(env); try { await ptsTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM notes WHERE ts<?').bind(Date.now() - 30 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM visits WHERE day<?').bind(dayKey(Date.now() - 45 * 86400000)).run(); await env.DB.prepare('DELETE FROM presence WHERE seen<?').bind(Date.now() - 2 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) { try { await ttsRebalance(env); } catch (e) {} await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } } catch (e) {} })());
   }
 };
 
@@ -1457,7 +1492,7 @@ async function route(request, env) {
       ROLES.forEach((r) => { const v = (ba.voices || {})[r]; if (v && typeof v === 'object') { const o = { ...cur.az.voices[r] }; if (/^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]{2,40}$/.test(String(v.v || ''))) o.v = String(v.v); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.rate || ''))) o.rate = String(v.rate); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.pitch || ''))) o.pitch = String(v.pitch); az.voices[r] = o; } });
       await setSetting(env, 'tts', { model: nm(b.model, cur.model), legacyModel: nm(b.legacyModel, cur.legacyModel), style: str(b.style, 200).trim() || cur.style, gv,
         concurrency: nu(b.concurrency, cur.concurrency, 1, 4), dailyMin: nu(b.dailyMin, cur.dailyMin, 0, 100000), freeMin: nu(b.freeMin, cur.freeMin, 0, 100000), priceIn: nu(b.priceIn, cur.priceIn, 0, 1000), priceOut: nu(b.priceOut, cur.priceOut, 0, 1000),
-        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, multi: b.multi == null ? cur.multi : !!b.multi, mm: b.mm == null ? cur.mm : !!b.mm, econ: b.econ == null ? cur.econ : !!b.econ, hideListen: b.hideListen == null ? cur.hideListen : !!b.hideListen, listenAll: b.listenAll == null ? cur.listenAll : !!b.listenAll, smart: b.smart == null ? cur.smart : !!b.smart, annModel: nm(b.annModel, cur.annModel), dict: b.dict == null ? cur.dict : String(b.dict).slice(0, 3000), az,
+        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, rebalance: b.rebalance == null ? cur.rebalance : !!b.rebalance, multi: b.multi == null ? cur.multi : !!b.multi, mm: b.mm == null ? cur.mm : !!b.mm, econ: b.econ == null ? cur.econ : !!b.econ, hideListen: b.hideListen == null ? cur.hideListen : !!b.hideListen, listenAll: b.listenAll == null ? cur.listenAll : !!b.listenAll, smart: b.smart == null ? cur.smart : !!b.smart, annModel: nm(b.annModel, cur.annModel), dict: b.dict == null ? cur.dict : String(b.dict).slice(0, 3000), az,
         g2: { dailyMin: nu((b.g2 || {}).dailyMin, cur.g2.dailyMin, 0, 100000), freeMin: nu((b.g2 || {}).freeMin, cur.g2.freeMin, 0, 100000), concurrency: nu((b.g2 || {}).concurrency, cur.g2.concurrency, 1, 4) },
         g3: { dailyMin: nu((b.g3 || {}).dailyMin, cur.g3.dailyMin, 0, 100000), freeMin: nu((b.g3 || {}).freeMin, cur.g3.freeMin, 0, 100000), concurrency: nu((b.g3 || {}).concurrency, cur.g3.concurrency, 1, 4) },
         g4: { dailyMin: nu((b.g4 || {}).dailyMin, cur.g4.dailyMin, 0, 100000), freeMin: nu((b.g4 || {}).freeMin, cur.g4.freeMin, 0, 100000), concurrency: nu((b.g4 || {}).concurrency, cur.g4.concurrency, 1, 4) },
@@ -1548,6 +1583,7 @@ async function route(request, env) {
       }
       return json({ ok: true, ...(await ttsStats(env)) });
     }
+    if (path === '/api/admin/tts/rebalance' && m === 'POST') { const ek = await withKeys(env.__base || env); const moved = await ttsRebalance(ek); return json({ ok: true, moved, ...(await ttsStats(ek)) }); }
     if (path === '/api/admin/tts/retry' && m === 'POST') {
       const b = await body(request, 300).catch(() => ({})), pv = PROVS.includes(b.prov) ? b.prov : null;
       await env.DB.prepare("UPDATE tts_ch SET status='queued',attempts=0,retry_at=0,err='' WHERE status='failed'" + (pv ? ' AND prov=?' : '')).bind(...(pv ? [pv] : [])).run();
