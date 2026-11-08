@@ -327,19 +327,20 @@ const AZ_VOICES = { narrator: { v: 'ar-SA-HamedNeural', rate: '-4%', pitch: '0%'
   boy: { v: 'ar-EG-ShakirNeural', rate: '+6%', pitch: '+38%' }, girl: { v: 'ar-EG-SalmaNeural', rate: '+6%', pitch: '+30%' } };
 const TTS_DEFAULT = { model: 'gemini-3.8-flash-tts', legacyModel: 'gemini-2.5-flash-preview-tts', style: 'warm, expressive audiobook narration in natural Egyptian Arabic', concurrency: 2, dailyMin: 20, freeMin: 0, priceIn: 0, priceOut: 0,
   gv: G_VOICES, defProv: 'gemini', novelProv: {}, multi: true, az: { region: '', dailyMin: 30, freeChars: 500000, price: 15, concurrency: 3, voices: AZ_VOICES } };
-const PROVS = ['gemini', 'gemini2', 'gemini3', 'gemini4', 'gemini5', 'gemini6', 'azure'];
+const PROVS = ['gemini', 'gemini2', 'gemini3', 'gemini4', 'gemini5', 'gemini6', 'azure', 'colab']; // colab = تحويل خارجي (OmniVoice على Colab) بيرفع الصوت الجاهز
+const isGoogle = (p) => /^gemini\d*$/.test(p);
 const normProv = (p) => (PROVS.includes(p) ? p : 'gemini');
 const isGem = (p) => p !== 'azure';
 // حسابات جوجل (1..6): كل حساب له مفتاحه وإعداداته وطابوره. المفتاح من أسرار Cloudflare (GEMINI_API_KEY, _2.._6) أو متسجّل من لوحة الأدمن
 const GN = { gemini: '', gemini2: '_2', gemini3: '_3', gemini4: '_4', gemini5: '_5', gemini6: '_6' };
 const gemKey = (env, prov) => env['GEMINI_API_KEY' + (GN[prov] || '')];
 const gemEnv = (env, prov) => (prov === 'gemini' ? env : { ...env, GEMINI_API_KEY: gemKey(env, prov) });
-const gcf = (conf, prov) => (prov === 'gemini' ? conf : conf['g' + prov.slice(6)]);
-const provCap = (conf, prov) => (prov === 'azure' ? conf.az.dailyMin : gcf(conf, prov).dailyMin);
-const provPar = (conf, prov) => (prov === 'azure' ? conf.az.concurrency : gcf(conf, prov).concurrency);
+const gcf = (conf, prov) => (prov === 'gemini' ? conf : conf['g' + prov.slice(6)] || { dailyMin: 0, concurrency: 1, freeMin: 0 });
+const provCap = (conf, prov) => (prov === 'colab' ? 100000 : prov === 'azure' ? conf.az.dailyMin : gcf(conf, prov).dailyMin);
+const provPar = (conf, prov) => (prov === 'colab' ? 1 : prov === 'azure' ? conf.az.concurrency : gcf(conf, prov).concurrency);
 let KC = { at: 0, v: null };
 async function savedKeys(env) { if (!KC.v || Date.now() - KC.at > 15000) KC = { at: Date.now(), v: (await getSetting(env, 'tts_keys')) || {} }; return KC.v; }
-async function withKeys(env) { const k = await savedKeys(env), e = { ...env, __base: env.__base || env }; for (const p of PROVS) if (p !== 'azure' && k[p]) e['GEMINI_API_KEY' + GN[p]] = k[p]; return e; }
+async function withKeys(env) { const k = await savedKeys(env), e = { ...env, __base: env.__base || env }; for (const p of PROVS) if (isGoogle(p) && k[p]) e['GEMINI_API_KEY' + GN[p]] = k[p]; return e; }
 async function getTtsConf(env) {
   const x = await getSetting(env, 'tts'), n = (v, d, lo, hi) => { const k = Number(v); return v !== '' && v != null && Number.isFinite(k) && k >= lo && k <= hi ? k : d; };
   const gv = {}; ROLES.forEach((r) => { const v = x.gv && x.gv[r]; gv[r] = /^[A-Za-z0-9_-]{2,40}$/.test(String(v || '')) ? String(v) : G_VOICES[r]; });
@@ -357,7 +358,7 @@ async function getTtsConf(env) {
     az: { region: /^[a-z0-9-]{3,30}$/.test(String(xa.region || '')) ? String(xa.region) : '', dailyMin: n(xa.dailyMin, 30, 0, 100000), freeChars: n(xa.freeChars, 500000, 0, 1e9), price: n(xa.price, 15, 0, 1000), concurrency: n(xa.concurrency, 3, 1, 8), voices } };
 }
 const azRegion = (env, conf) => conf.az.region || String(env.AZURE_SPEECH_REGION || '').trim().toLowerCase();
-const provReady = (env, conf, prov) => !!env.TTS_BUCKET && (prov === 'azure' ? !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)) : !!gemKey(env, prov));
+const provReady = (env, conf, prov) => !!env.TTS_BUCKET && (prov === 'colab' ? true : prov === 'azure' ? !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)) : !!gemKey(env, prov));
 function ttsPrices(conf, now = Date.now()) { const late = now >= Date.UTC(2027, 0, 1); return { inP: conf.priceIn || (late ? 1 : 0.5), outP: conf.priceOut || (late ? 18 : 9) }; }
 function ttsCost(chars, secs, conf) { const p = ttsPrices(conf); return (Math.ceil(chars / 2.5) * p.inP + secs * 25 * p.outP) / 1e6; }
 const dayKey = (t = Date.now()) => new Date(t + 2 * 3600000).toISOString().slice(0, 10); // بتوقيت مصر تقريبًا
@@ -619,8 +620,8 @@ async function ttsBump(env, prov, cols) {
   const sets = Object.keys(cols).map((k) => k + '=' + k + '+?').join(',');
   await env.DB.prepare('UPDATE tts_use SET ' + sets + ' WHERE day=? AND prov=?').bind(...Object.values(cols), d, prov).run();
 }
-const stKey = (prov) => (prov === 'azure' ? 'tts_state_az' : prov === 'gemini' ? 'tts_state' : 'tts_state_g' + prov.slice(6));
-const PNAME = { gemini: 'جوجل 1', gemini2: 'جوجل 2', gemini3: 'جوجل 3', gemini4: 'جوجل 4', gemini5: 'جوجل 5', gemini6: 'جوجل 6', azure: 'مايكروسوفت (Azure)' };
+const stKey = (prov) => (prov === 'colab' ? 'tts_state_ext' : prov === 'azure' ? 'tts_state_az' : prov === 'gemini' ? 'tts_state' : 'tts_state_g' + prov.slice(6));
+const PNAME = { colab: 'Colab (OmniVoice)', gemini: 'جوجل 1', gemini2: 'جوجل 2', gemini3: 'جوجل 3', gemini4: 'جوجل 4', gemini5: 'جوجل 5', gemini6: 'جوجل 6', azure: 'مايكروسوفت (Azure)' };
 async function ttsAlertAdmins(env, title, text, prov = 'gemini') {
   const key = stKey(prov), st = await getSetting(env, key), now = Date.now();
   if (st.alertAt && now - st.alertAt < 6 * 3600000) return;
@@ -659,6 +660,7 @@ async function ttsStep(env, opts = {}) {
 async function ttsStep0(env, opts = {}) {
   const prov = normProv(opts.prov), conf = await getTtsConf(env);
   if (!provReady(env, conf, prov)) return { ok: false, idle: 'not_configured', prov };
+  if (prov === 'colab') return { ok: true, idle: 'external', prov };
   const now = Date.now(), key = stKey(prov), st = await getSetting(env, key);
   if (st.pausedUntil && st.pausedUntil > now && !opts.force) return { ok: true, idle: 'paused', prov };
   const u = await env.DB.prepare('SELECT secs FROM tts_use WHERE day=? AND prov=?').bind(dayKey(), prov).first();
@@ -715,7 +717,7 @@ async function ttsStats(env) {
   const sum = async (prov, where, ...a) => env.DB.prepare('SELECT COALESCE(SUM(reqs),0) AS reqs,COALESCE(SUM(chars),0) AS chars,COALESCE(SUM(secs),0) AS secs,COALESCE(SUM(cost),0) AS cost,COALESCE(SUM(fails),0) AS fails,COALESCE(SUM(limited),0) AS limited FROM tts_use WHERE prov=? AND ' + where).bind(prov, ...a).first();
   const { results: novels } = await env.DB.prepare("SELECT nid,MAX(ntitle) AS title,MIN(ord) AS ord,MAX(prov) AS prov,COUNT(*) AS n,SUM(status='done') AS d,SUM(CASE WHEN status='running' AND lock_until>"+Date.now()+" THEN 1 ELSE 0 END) AS run,SUM(LENGTH(text)) AS chars,SUM(CASE WHEN status='done' THEN 0 ELSE LENGTH(text)*(1.0-done*1.0/(CASE WHEN nparts<1 THEN 1 ELSE nparts END)) END) AS rem FROM tts_ch GROUP BY nid ORDER BY MIN(ord),nid LIMIT 120").all();
   const q = await env.DB.prepare('SELECT prov,status,COUNT(*) AS n FROM tts_ch GROUP BY prov,status').all();
-  const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { ...Object.fromEntries(PROVS.filter((p) => p !== 'azure').map((p) => [p, !!gemKey(env, p)])), azure: !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)), azureKey: !!env.AZURE_SPEECH_KEY, azureRegion: azRegion(env, conf) }, prov: {}, keys: Object.fromEntries(Object.entries(await savedKeys(env)).map(([p, v]) => [p, v ? 'app' : ''])), prices: pr,
+  const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { ...Object.fromEntries(PROVS.filter(isGoogle).map((p) => [p, !!gemKey(env, p)])), colab: !!env.TTS_BUCKET, azure: !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)), azureKey: !!env.AZURE_SPEECH_KEY, azureRegion: azRegion(env, conf) }, prov: {}, keys: Object.fromEntries(Object.entries(await savedKeys(env)).map(([p, v]) => [p, v ? 'app' : ''])), prices: pr,
     chapters: { queued: 0, running: 0, done: 0, failed: 0 }, novels: novels.map((r) => ({ nid: r.nid, title: r.title, ord: r.ord, prov: r.prov, n: r.n, d: r.d || 0, run: r.run || 0, rem: Math.round(r.rem || 0) })) };
   q.results.forEach((r) => (out.chapters[r.status] = (out.chapters[r.status] || 0) + r.n));
   out.hasKey = out.has.gemini;
@@ -728,6 +730,8 @@ async function ttsStats(env) {
     if (prov === 'azure') {
       o.freeChars = conf.az.freeChars; o.monthPct = conf.az.freeChars ? Math.min(999, Math.round(month.chars / conf.az.freeChars * 100)) : null; o.extraCostMonth = Math.max(0, month.chars - conf.az.freeChars) * conf.az.price / 1e6;
       o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: remChars * conf.az.price / 1e6, days: cap ? Math.ceil(remSecs / cap) : null };
+    } else if (prov === 'colab') {
+      o.dailyMin = 0; o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: 0, days: null }; o.external = true;
     } else {
       const fm = gcf(conf, prov).freeMin, freeSecs = fm * 60, extraSecs = Math.max(0, today.secs - freeSecs);
       o.freeMin = fm; o.freeUsedPct = freeSecs ? Math.min(999, Math.round(today.secs / freeSecs * 100)) : null; o.extraCostToday = freeSecs ? (extraSecs * 25 * pr.outP) / 1e6 : null;
@@ -1502,7 +1506,7 @@ async function route(request, env) {
       // تنضيف اللصق: مسافات/أسطر/رموز مخفية/علامات تنصيص/كلمة key= أو Bearer
       let key = String(b.key || '').normalize('NFKC').replace(/[\s\u200B-\u200F\u202A-\u202E\u2060\uFEFF"'`<>]/g, '').replace(/^(bearer|key=|apikey=|api_key=|x-goog-api-key:)/i, '');
       const am = /AIza[A-Za-z0-9_-]{30,60}/.exec(key); if (am) key = am[0];
-      if (!PROVS.includes(prov) || prov === 'azure') return fail('حساب جوجل غير صحيح');
+      if (!PROVS.includes(prov) || !isGoogle(prov)) return fail('حساب جوجل غير صحيح');
       if (key && !/^[A-Za-z0-9_.-]{20,140}$/.test(key)) return fail('المفتاح شكله غلط (طوله ' + key.length + ' وفيه رموز غريبة) — انسخه كامل من Google AI Studio');
       const cur = await getSetting(env, 'tts_keys'); if (key) cur[prov] = key; else delete cur[prov];
       await setSetting(env, 'tts_keys', cur); KC = { at: 0, v: null };
@@ -1536,6 +1540,48 @@ async function route(request, env) {
         await env.DB.prepare("UPDATE tts_ch SET prov=?,sig='',done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=? WHERE nid=?").bind(prov, Date.now(), nid).run();
       }
       return json({ ok: true, ...(await ttsStats(env)) });
+    }
+    // ===== تحويل خارجي (OmniVoice على Colab): السيرفر بيدّي الفصول بأجزائها وأدوار المتكلمين ويستقبل الصوت الجاهز =====
+    if (path === '/api/admin/tts/ext/jobs' && m === 'GET') {
+      const lim = Math.max(1, Math.min(10, parseInt(url.searchParams.get('limit'), 10) || 3)), conf = await getTtsConf(env);
+      const { results } = await env.DB.prepare("SELECT id,nid,idx,ntitle,ctitle,text,parts FROM tts_ch WHERE prov='colab' AND status!='done' ORDER BY ord ASC,nid ASC,idx ASC LIMIT ?").bind(lim).all();
+      const jobs = [];
+      for (const c of results) {
+        const ps = JSON.parse(c.parts || '[]'), parts = [];
+        for (let i = 0; i < ps.length; i++) {
+          const raw = c.text.slice(ps[i][0], ps[i][1]).trim(), ctx = c.text.slice(Math.max(0, ps[i][0] - 600), ps[i][0]);
+          let runs; try { runs = applyDict(conf.multi ? await smartRoles(env, raw, conf, ctx) : [{ role: 'narrator', text: stripMarks(raw) }], conf); } catch (e) { runs = applyDict([{ role: 'narrator', text: stripMarks(raw) }], conf); }
+          parts.push({ i, runs: runs.filter((r) => hasLetters(r.text)).map((r) => ({ role: r.role, text: r.text })) });
+        }
+        jobs.push({ id: c.id, nid: c.nid, idx: c.idx, novel: c.ntitle, chapter: c.ctitle, n: ps.length, parts });
+      }
+      const left = await env.DB.prepare("SELECT COUNT(*) AS n FROM tts_ch WHERE prov='colab' AND status!='done'").first();
+      return json({ jobs, left: left ? left.n : 0 });
+    }
+    if (path === '/api/admin/tts/ext/part' && m === 'POST') {
+      if (!env.TTS_BUCKET) return fail('التخزين مش متفعّل', 503);
+      const id = parseInt(url.searchParams.get('id'), 10), i = parseInt(url.searchParams.get('i'), 10);
+      const c = await env.DB.prepare("SELECT id,nparts,prov FROM tts_ch WHERE id=?").bind(id).first();
+      if (!c || c.prov !== 'colab') return fail('الفصل مش موجود أو مش على Colab', 404);
+      if (!(i >= 0 && i < c.nparts)) return fail('رقم الجزء غلط');
+      const buf = new Uint8Array(await request.arrayBuffer());
+      if (buf.length < 100 || buf.length > 40e6 || String.fromCharCode(buf[0], buf[1], buf[2], buf[3]) !== 'RIFF') return fail('الملف لازم يكون WAV صحيح');
+      await env.TTS_BUCKET.put('c/' + id + '/' + i + '.wav', buf, { httpMetadata: { contentType: 'audio/wav' } });
+      return json({ ok: true, bytes: buf.length });
+    }
+    if (path === '/api/admin/tts/ext/finish' && m === 'POST') {
+      const b = await body(request, 200), id = parseInt(b.id, 10);
+      const c = await env.DB.prepare("SELECT id,nparts,prov FROM tts_ch WHERE id=?").bind(id).first();
+      if (!c || c.prov !== 'colab') return fail('الفصل مش موجود أو مش على Colab', 404);
+      let secs = 0;
+      for (let i = 0; i < c.nparts; i++) {
+        const o = await env.TTS_BUCKET.get('c/' + id + '/' + i + '.wav', { range: { offset: 0, length: 64 } });
+        if (!o) return fail('ناقص الجزء رقم ' + i);
+        const hd = new DataView(await o.arrayBuffer()), br = hd.byteLength >= 32 ? hd.getUint32(28, true) : 48000, size = (await env.TTS_BUCKET.head('c/' + id + '/' + i + '.wav')).size;
+        secs += Math.max(0, size - 44) / (br || 48000);
+      }
+      await env.DB.prepare("UPDATE tts_ch SET status='done',done=?,secs=?,err='',owner='',lock_until=0,updated=? WHERE id=?").bind(c.nparts, secs, Date.now(), id).run();
+      return json({ ok: true, secs });
     }
     if (path === '/api/admin/tts/retry' && m === 'POST') {
       const b = await body(request, 300).catch(() => ({})), pv = PROVS.includes(b.prov) ? b.prov : null;
