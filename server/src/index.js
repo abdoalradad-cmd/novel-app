@@ -560,8 +560,18 @@ async function geminiPart(env, text, conf, ctx) { // جزء واحد: أدوار
   for (const r of runs) { if (!cur || (!cur.roles.has(r.role) && cur.roles.size >= (conf.mm ? 2 : 1))) { cur = { roles: new Set(), items: [] }; groups.push(cur); } cur.roles.add(r.role); cur.items.push(r); }
   const wavs = new Array(groups.length); let chars = 0, nxt = 0;
   groups.forEach((g) => { chars += g.items.map((x) => x.text).join(' ').length; });
-  const one = async (i) => { const g = groups[i], roles = [...g.roles], tgs = g.items.some((x) => x.tg), t = g.items.length > 1 ? g.items.map((x) => (x.tg ? x.text : cueTxt(x))).join(' ') : g.items[0].text;
+  const one0 = async (i) => { const g = groups[i], roles = [...g.roles], tgs = g.items.some((x) => x.tg), t = g.items.length > 1 ? g.items.map((x) => (x.tg ? x.text : cueTxt(x))).join(' ') : g.items[0].text;
     wavs[i] = roles.length === 1 ? await geminiSpeak(env, t, conf.gv[roles[0]], conf, roleStyle(conf, roles[0], g.items.length === 1 && !tgs ? g.items[0].emo : '') + ((tgs || g.items.length > 1) ? '. The text has square-bracket cues: act each cue out exactly with that feeling for the sentences after it, and never read the cue aloud' : '')) : await geminiMulti(env, roles[0], roles[1], g.items, conf); };
+  // حماية من الصوت الناقص: جوجل أحيانًا بترجّع صوت قصير (بيقرا أول سطر/العنوان وبس) — بنقارن المدة بعدد الحروف ونعيد المحاولة
+  const one = async (i) => {
+    const g = groups[i], clean = g.items.map((x) => String(x.text).replace(/\[[^\]]*\]/g, '')).join(' '), need = clean.replace(/\s/g, '').length;
+    for (let k = 0; k < 3; k++) {
+      await one0(i);
+      const secs = Math.max(0, wavs[i].length - 44) / 48000;
+      if (need < 40 || secs >= need / 22) return;
+    }
+    const e = new Error('short_audio'); e.code = 502; e.detail = 'الصوت اللي رجع من جوجل ناقص (قصير عن النص) — هيتعاد'; throw e;
+  };
   // الأجزاء الصغيرة (الأدوار) بتتحوّل بالتوازي (3 مع بعض) علشان الجزء يخلص قبل ما الوقت يخلص
   await Promise.all(Array.from({ length: Math.min(3, groups.length) }, async () => { while (nxt < groups.length) { const i = nxt++; await one(i); } }));
   const wav = joinWavs(wavs); return { wav, chars, calls: groups.length };
