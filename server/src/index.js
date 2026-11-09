@@ -137,6 +137,9 @@ async function ensureSchema(env) {
     "CREATE TABLE IF NOT EXISTS contest_answers (id INTEGER PRIMARY KEY AUTOINCREMENT, week TEXT NOT NULL, user_id INTEGER NOT NULL, answers TEXT NOT NULL DEFAULT '[]', ts INTEGER NOT NULL DEFAULT 0)",
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_contest_ans ON contest_answers(week, user_id)',
     'CREATE TABLE IF NOT EXISTS pts_votes (voter INTEGER NOT NULL, nid TEXT NOT NULL, ch INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (voter, nid, ch))',
+    "CREATE TABLE IF NOT EXISTS streaks (uid INTEGER PRIMARY KEY, last TEXT NOT NULL DEFAULT '', cur INTEGER NOT NULL DEFAULT 0, awards INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS ch_alerts (uid INTEGER NOT NULL, nid TEXT NOT NULL, ch INTEGER NOT NULL, rel INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', sent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (uid, nid, ch))",
+    'CREATE INDEX IF NOT EXISTS ch_alerts_due ON ch_alerts (sent, rel)',
     "CREATE TABLE IF NOT EXISTS pts_draws (week TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', points REAL NOT NULL DEFAULT 0, prize REAL NOT NULL DEFAULT 0, ts INTEGER NOT NULL DEFAULT 0)",
     'CREATE TABLE IF NOT EXISTS purchases (user_id INTEGER NOT NULL, nid TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (user_id, nid))',
     "CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, nid TEXT NOT NULL, ntitle TEXT NOT NULL DEFAULT '', author_id INTEGER NOT NULL DEFAULT 0, price REAL NOT NULL DEFAULT 0, share REAL NOT NULL DEFAULT 0, method TEXT NOT NULL DEFAULT '', sender TEXT NOT NULL DEFAULT '', proof TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', reason TEXT NOT NULL DEFAULT '', paid_out INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, decided_at INTEGER NOT NULL DEFAULT 0)",
@@ -184,6 +187,8 @@ const str = (v, max) => String(v == null ? '' : v).replace(/\r\n/g, '\n').slice(
 const GRADS = ['from-emerald-900 via-slate-950 to-black', 'from-slate-900 via-blue-950 to-slate-950', 'from-amber-950 via-stone-900 to-black', 'from-rose-950 via-slate-950 to-black', 'from-purple-950 via-slate-900 to-black'];
 const ICONS = ['fa-book', 'fa-flask-vial', 'fa-feather-pointed', 'fa-anchor', 'fa-hourglass-half', 'fa-key', 'fa-masks-theater'];
 function cleanUrl(u) { u = str(u, LIM.cover).trim(); return /^https:\/\/[^\s<>"']+$/i.test(u) ? u : ''; }
+// جدولة الفصول: وقت النشر بالمللي ثانية (0 = ينزل علطول)
+const relOf = (v) => { v = Math.floor(+v); return Number.isFinite(v) && v > 1e12 && v < Date.now() + 400 * 86400000 ? v : 0; };
 function cleanNovel(b) {
   const title = str(b.title, LIM.title).trim();
   if (!title) throw new Error('اكتب عنوان الرواية');
@@ -194,7 +199,7 @@ function cleanNovel(b) {
   const chs = chapters.map((c, i) => {
     const content = str(c && c.content, LIM.chContent);
     total += content.length;
-    return { title: str(c && c.title, LIM.chTitle).trim() || `الفصل ${i + 1}`, content, locked: c && c.locked ? 1 : 0 };
+    return { title: str(c && c.title, LIM.chTitle).trim() || `الفصل ${i + 1}`, content, locked: c && c.locked ? 1 : 0, release: relOf(c && c.release) };
   });
   if (total > LIM.totalChars) throw new Error('حجم النص كبير جدًا');
   const password = str(b.password, LIM.pass).trim();
@@ -203,6 +208,7 @@ function cleanNovel(b) {
   const extra = { subtitle: str(b.subtitle, LIM.subtitle).trim(), novelStatus: b.novelStatus === 'مكتملة' ? 'مكتملة' : 'مستمرة',
     promoUrl: cleanUrl(b.promoUrl), pdfUrl: cleanUrl(b.pdfUrl), grad: GRADS.includes(b.grad) ? b.grad : GRADS[0],
     icon: ICONS.includes(b.icon) ? b.icon : 'fa-book', allowSharing: b.allowSharing !== false, paper: !!b.paper, password, lockAll, lockPdf: b.lockPdf !== false };
+  if (chs.some((c) => c.release)) extra.rel = chs.map((c) => c.release);
   if (b.siteId) extra.siteId = str(b.siteId, 80);
   extra.price = (lockAll || anyLocked || extra.pdfUrl) ? cleanPrice(b.price) : 0; extra.oldPrice = extra.price && cleanPrice(b.oldPrice) > extra.price ? cleanPrice(b.oldPrice) : 0;
   return { title, author: str(b.author, LIM.author).trim(), genre: str(b.genre, LIM.genre).trim() || 'عام',
@@ -256,7 +262,7 @@ const cleanPrice = (v) => { const n = parseFloat(String(v == null ? '' : v).repl
 function extraOf(raw) {
   const x = parseJson(raw);
   return { subtitle: x.subtitle || '', novelStatus: x.novelStatus || 'مستمرة', promoUrl: x.promoUrl || '', pdfUrl: x.pdfUrl || '', grad: GRADS.includes(x.grad) ? x.grad : GRADS[0],
-    icon: ICONS.includes(x.icon) ? x.icon : 'fa-book', allowSharing: x.allowSharing !== false, paper: !!x.paper, password: x.password || '', lockAll: !!x.lockAll, lockPdf: x.lockPdf !== false, price: cleanPrice(x.price), oldPrice: cleanPrice(x.oldPrice), siteId: x.siteId || '' };
+    icon: ICONS.includes(x.icon) ? x.icon : 'fa-book', allowSharing: x.allowSharing !== false, paper: !!x.paper, password: x.password || '', lockAll: !!x.lockAll, lockPdf: x.lockPdf !== false, price: cleanPrice(x.price), oldPrice: cleanPrice(x.oldPrice), siteId: x.siteId || '', rel: Array.isArray(x.rel) ? x.rel.slice(0, 2000).map((n) => +n || 0) : [] };
 }
 function myNovelRow(r) {
   return { id: r.id, status: r.status, isLive: !!r.is_live, hidden: !!r.hidden, rejectReason: r.reject_reason, updatedAt: r.updated_at, publishedAt: r.published_at,
@@ -719,7 +725,7 @@ async function ttsStep0(env, opts = {}) {
   if (conf.econ && ch.done === 0 && parts.length > 1 && Math.max(...parts.map((x) => x[1] - x[0])) <= 800) { // فصل لسه ما بدأش: نكبّر الأجزاء علشان الطلبات تقل
     const np = splitParts(ch.text, ECON_MX); if (np.length && np.length < parts.length) { parts = np; await env.DB.prepare('UPDATE tts_ch SET parts=?,nparts=? WHERE id=?').bind(JSON.stringify(np), np.length, ch.id).run(); }
   }
-  let done = ch.done, secsTot = ch.secs, made = 0, err = '', hardFail = false, limMsg = '';
+  let done = ch.done, secsTot = ch.secs, made = 0, err = '', hardFail = false, deadKey = false, limMsg = '';
   const t0 = Date.now();
   while (done < parts.length && Date.now() - t0 < 22000 && made < 8 && used < cap) {
     const idxs = []; for (let k = 0; k < par && done + k < parts.length && made + k < 8; k++) idxs.push(done + k);
@@ -738,7 +744,9 @@ async function ttsStep0(env, opts = {}) {
         if (prefix) done++;
       } else {
         prefix = false; const e = x.reason || {};
-        if (e.code === 429) { limited = true; limMsg = e.detail || limMsg; } else { err = String(e.message || 'error').slice(0, 100); hardFail = true; }
+        if (e.code === 429) { limited = true; limMsg = e.detail || limMsg; }
+        else if (e.code === 401 || /^gemini_(401|403)$/.test(String(e.message))) { deadKey = true; err = 'key_dead'; } // مفتاح مرفوض / مشروع جوجل اتوقّف
+        else { err = String(e.message || 'error').slice(0, 100); hardFail = true; }
       }
     }
     if (limited) {
@@ -747,6 +755,13 @@ async function ttsStep0(env, opts = {}) {
       await ttsBump(env, prov, { limited: 1 });
       await ttsAlertAdmins(env, '⚠️ تحويل الصوت وقف (' + PNAME[prov] + '): الحصة خلصت أو الطلبات كتيرة', PNAME[prov] + ' رفضت طلبات الصوت (429). التحويل واقف شوية وهيكمّل لوحده. راجع حصتك أو فعّل الفوترة.', prov);
       err = 'limit'; break;
+    }
+    if (deadKey) { // المفتاح مرفوض: نوقف الحساب ده 6 ساعات (من غير ما نحسبها محاولة فاشلة على الفصل) ورواياته اللي لسه ما بدأتش تتوزع على الحسابات التانية
+      const cs = await getSetting(env, key);
+      await setSetting(env, key, { ...cs, pausedUntil: Date.now() + 6 * 3600000, exhaustedAt: Date.now(), limMsg: 'المفتاح مرفوض أو مشروع جوجل اتوقّف — غيّر المفتاح من تاب الحساب', limDaily: false, dead: true });
+      await ttsBump(env, prov, { fails: 1 });
+      await ttsAlertAdmins(env, '🚫 مفتاح ' + PNAME[prov] + ' مرفوض', 'جوجل رفضت المفتاح (403/401) — غالبًا المشروع اتوقّف أو المفتاح اتلغى. وقفنا الحساب ده 6 ساعات وهنوزّع رواياته اللي لسه ما بدأتش على الحسابات التانية. غيّر المفتاح من تاب الحساب في إعدادات الصوت.', prov).catch(() => {});
+      break;
     }
     if (hardFail) { await ttsBump(env, prov, { fails: 1 }); break; }
   }
@@ -782,6 +797,59 @@ async function ttsStats(env) {
     out.prov[prov] = o;
   }
   return out;
+}
+
+
+/* ---------- كبار الداعمين + سلسلة الأيام + تنبيهات نزول الفصول ---------- */
+const FAN_TIERS = [[100, 'big', 'من كبار الداعمين', '💎'], [50, 'pro', 'داعم مميز', '🔥'], [20, 'fan', 'داعم', '🌟']];
+let FANS_CACHE = { t: 0, v: null };
+async function fanScores(env) { // نقاط كل قارئ عند كل كاتب: شراء روايات + تقييم وتعليق على الفصول. محسوبة من الداتا نفسها فتفضل ثابتة على الحساب
+  if (FANS_CACHE.v && Date.now() - FANS_CACHE.t < 60000) return FANS_CACHE.v;
+  const OWN = await ownerId(env), nidAuthor = {};
+  const { results: nv } = await env.DB.prepare('SELECT id,user_id,l_extra,d_extra FROM novels').all();
+  for (const r of nv) { nidAuthor['u' + r.id] = r.user_id; const s = extraOf(r.l_extra).siteId || extraOf(r.d_extra).siteId; if (s) nidAuthor[s] = r.user_id; }
+  const authorOf = (nid) => (nidAuthor[nid] != null ? nidAuthor[nid] : OWN);
+  const { results: vt } = await env.DB.prepare('SELECT voter AS uid, nid, COUNT(*) AS n FROM pts_votes GROUP BY voter, nid').all();
+  const { results: both } = await env.DB.prepare('SELECT v.voter AS uid, v.nid AS nid, COUNT(DISTINCT v.ch) AS n FROM pts_votes v JOIN cmt_log c ON c.uid=v.voter AND c.nid=v.nid AND c.ch=v.ch AND c.elig=1 GROUP BY v.voter, v.nid').all();
+  const { results: pu } = await env.DB.prepare('SELECT user_id AS uid, nid FROM purchases').all();
+  const S = {}, add = (a, u, v) => { if (a === u) return; (S[a] = S[a] || {})[u] = ((S[a] || {})[u] || 0) + v; };
+  const bothMap = {}; for (const r of both) bothMap[r.uid + '|' + r.nid] = r.n;
+  for (const r of vt) { const b = bothMap[r.uid + '|' + r.nid] || 0; add(authorOf(r.nid), r.uid, b * 2 + (r.n - b) * 0.5); }
+  for (const r of pu) add(authorOf(r.nid), r.uid, 40);
+  FANS_CACHE = { t: Date.now(), v: S, own: OWN };
+  return S;
+}
+const fanTier = (score, rank) => (rank === 1 && score >= 20 ? { tier: 'top', label: 'الداعم الأول', ic: '👑' } : (() => { for (const [min, tier, label, ic] of FAN_TIERS) if (score >= min) return { tier, label, ic }; return null; })());
+async function fansOf(env, author) {
+  const S = await fanScores(env), a = author > 0 ? author : (FANS_CACHE.own || 0), row = S[a] || {};
+  const top = Object.keys(row).map((u) => ({ uid: +u, score: Math.round(row[u] * 10) / 10 })).filter((x) => x.score >= 20).sort((x, y) => y.score - x.score || x.uid - y.uid).slice(0, 150);
+  if (!top.length) return [];
+  const { results: us } = await env.DB.prepare('SELECT id,name FROM users WHERE id IN (' + top.map(() => '?').join(',') + ')').bind(...top.map((x) => x.uid)).all();
+  const nm = {}; us.forEach((u) => { nm[u.id] = u.name; });
+  return top.map((x, i) => ({ uid: x.uid, name: nm[x.uid] || '', score: x.score, rank: i + 1, ...fanTier(x.score, i + 1) })).filter((x) => x.tier && x.name);
+}
+async function streakConf(env) { const c = await getSetting(env, 'streak'); const n = (v, d, a, z) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(z, v)) : d; }; return { on: c.on !== false, days: Math.round(n(c.days, 7, 2, 60)), pts: n(c.pts, 3, 0, 1000) }; }
+async function streakCheckin(env, uid) {
+  const sc = await streakConf(env), today = cairoDay(), yest = new Date(Date.parse(today + 'T00:00:00Z') - DAYMS).toISOString().slice(0, 10);
+  const r = await env.DB.prepare('SELECT last,cur,awards FROM streaks WHERE uid=?').bind(uid).first();
+  if (!sc.on) return { on: false, cur: r ? r.cur : 0, days: sc.days, pts: sc.pts, awarded: 0 };
+  if (r && r.last === today) return { on: true, cur: r.cur || 0, days: sc.days, pts: sc.pts, awarded: 0, today: true, shown: r.cur || sc.days };
+  let cur = r && r.last === yest ? r.cur + 1 : 1, awarded = 0, awards = r ? r.awards : 0;
+  const shown = cur; if (cur >= sc.days) { awarded = sc.pts; awards++; cur = 0; }
+  let ok;
+  if (r) { const u = await env.DB.prepare('UPDATE streaks SET last=?,cur=?,awards=? WHERE uid=? AND last<>?').bind(today, cur, awards, uid, today).run(); ok = !!(u && u.meta && u.meta.changes); }
+  else { const u = await env.DB.prepare('INSERT OR IGNORE INTO streaks (uid,last,cur,awards) VALUES (?,?,?,?)').bind(uid, today, cur, awards).run(); ok = !!(u && u.meta && u.meta.changes); }
+  if (!ok) return { on: true, cur: r ? r.cur : 0, days: sc.days, pts: sc.pts, awarded: 0, today: true };
+  if (awarded > 0) await env.DB.prepare('UPDATE users SET wallet=ROUND(wallet+?,1) WHERE id=?').bind(awarded, uid).run();
+  return { on: true, cur, shown, days: sc.days, pts: sc.pts, awarded, awards, today: false };
+}
+async function alertsTick(env) { // من الـ Cron: لما يحين ميعاد فصل مجدول يتبعت إشعار لكل اللي ضغطوا «نبهني»
+  const now = Date.now(), { results } = await env.DB.prepare('SELECT uid,nid,ch,title FROM ch_alerts WHERE sent=0 AND rel>0 AND rel<=? LIMIT 300').bind(now).all();
+  for (const a of results) {
+    const up = await env.DB.prepare('UPDATE ch_alerts SET sent=1 WHERE uid=? AND nid=? AND ch=? AND sent=0').bind(a.uid, a.nid, a.ch).run();
+    if (up && up.meta && up.meta.changes) await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(a.uid, 'release', a.nid, '', a.title || 'فصل جديد', 'الفصل اللي كنت مستنيه نزل دلوقتي 🎉 اقرأه الآن', now).run();
+  }
+  await env.DB.prepare('DELETE FROM ch_alerts WHERE sent=1 AND rel<?').bind(now - 30 * 86400000).run();
 }
 
 /* ---------- المسابقة الأسبوعية + نقاط الكتّاب + قرعة نقاط الفوز ---------- */
@@ -877,7 +945,7 @@ export default {
   },
   // كل دقيقة: يكمّل تحويل الفصول في الطابور (بحد يومي)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureSchema(env); env = await withKeys(env); try { await ptsTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM notes WHERE ts<?').bind(Date.now() - 30 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM visits WHERE day<?').bind(dayKey(Date.now() - 45 * 86400000)).run(); await env.DB.prepare('DELETE FROM presence WHERE seen<?').bind(Date.now() - 2 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) { try { await ttsRebalance(env); } catch (e) {} await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureSchema(env); env = await withKeys(env); try { await ptsTick(env); } catch (e) {} try { await alertsTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM notes WHERE ts<?').bind(Date.now() - 30 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM visits WHERE day<?').bind(dayKey(Date.now() - 45 * 86400000)).run(); await env.DB.prepare('DELETE FROM presence WHERE seen<?').bind(Date.now() - 2 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) { try { await ttsRebalance(env); } catch (e) {} await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } } catch (e) {} })());
   }
 };
 
@@ -935,7 +1003,7 @@ async function route(request, env) {
       const x = extraOf(r.l_extra);
       return { id: r.id, title: r.l_title, subtitle: x.subtitle, author: r.l_author || r.owner, genre: r.l_genre, tags: parseTags(r.l_tags),
         synopsis: r.l_synopsis, cover: r.l_cover, novelStatus: x.novelStatus, promoUrl: x.promoUrl, pdfUrl: x.pdfUrl, grad: x.grad, icon: x.icon, allowSharing: x.allowSharing, paper: !!x.paper, price: x.price, oldPrice: x.oldPrice, locked: !!(x.lockAll && x.password), pdfLocked: !!(x.password && x.lockPdf && (x.lockAll || chapLocked[r.id])),
-        publishedAt: r.published_at, owner: r.owner, uid: r.user_id, chapters: byNovel[r.id] || [] };
+        publishedAt: r.published_at, owner: r.owner, uid: r.user_id, chapters: (byNovel[r.id] || []).map((c, i) => (x.rel[i] ? { ...c, release: x.rel[i] } : c)) };
     }) }, 200, { 'Cache-Control': 'public, max-age=60' });
   }
   if ((g = /^\/api\/novels\/(\d+)\/unlock$/.exec(path)) && m === 'POST') {
@@ -955,6 +1023,7 @@ async function route(request, env) {
     if (!c) return fail('الفصل غير موجود', 404);
     const x = extraOf(n.l_extra);
     if (x.password && (x.lockAll || c.locked) && !(await hasUnlock(env, request, +g[1]))) return fail('الفصل مقفول — اكتب الباسورد', 403);
+    const relAt = x.rel[+g[2]] || 0; if (relAt > Date.now()) return json({ error: 'الفصل ده لسه ما نزلش', sched: relAt }, 403);
     const locked = !!(x.password && (x.lockAll || c.locked));
     return json({ title: c.title, content: c.content }, 200, { 'Cache-Control': locked ? 'private, no-store' : 'public, max-age=300' });
   }
@@ -964,7 +1033,7 @@ async function route(request, env) {
     const x = extraOf(n.l_extra);
     const open = !x.password || await hasUnlock(env, request, +g[1]);
     const { results } = await env.DB.prepare("SELECT title,content,locked FROM chapters WHERE novel_id=? AND ver='l' ORDER BY idx").bind(+g[1]).all();
-    const chapters = results.map((c) => (open || !(x.lockAll || c.locked)) ? { title: c.title, content: c.content } : { title: c.title, content: '', locked: true });
+    const nowT = Date.now(); const chapters = results.map((c, i) => { const rel = x.rel[i] || 0, sched = rel > nowT; const o = (!sched && (open || !(x.lockAll || c.locked))) ? { title: c.title, content: c.content } : { title: c.title, content: '', locked: true }; if (rel) o.release = rel; return o; });
     return json({ chapters }, 200, { 'Cache-Control': x.password ? 'private, no-store' : 'public, max-age=300' });
   }
 
@@ -1009,6 +1078,7 @@ async function route(request, env) {
 
   /* ----- المسابقات (عام) ----- */
   if (path === '/api/contest' && m === 'GET') { const me = request.headers.get('Authorization') ? await authUser(env, request) : null; return json(await contestPublic(env, me), 200, { 'Cache-Control': 'no-store' }); }
+  if (path === '/api/fans' && m === 'GET') { const au = Math.max(0, Math.floor(+url.searchParams.get('author') || 0)); return json({ fans: await fansOf(env, au) }, 200, { 'Cache-Control': 'public, max-age=60' }); }
   if (path === '/api/points' && m === 'GET') { const me = request.headers.get('Authorization') ? await authUser(env, request) : null; return json(await pointsPublic(env, me), 200, { 'Cache-Control': 'no-store' }); }
 
   if (path === '/api/tts/ready' && m === 'GET') {
@@ -1084,7 +1154,21 @@ async function route(request, env) {
     await env.DB.prepare('INSERT INTO contest_answers (week,user_id,answers,ts) VALUES (?,?,?,?)').bind(cur, user.id, JSON.stringify(answers), Date.now()).run();
     return json({ ok: true });
   }
-  if (path === '/api/me/points' && m === 'GET') { const r0 = await env.DB.prepare('SELECT points,wallet FROM users WHERE id=?').bind(user.id).first() || {}; const cf = await cmtConf(env), td = await env.DB.prepare('SELECT COUNT(*) AS n FROM cmt_log WHERE uid=? AND day=?').bind(user.id, cairoDay()).first(); return json({ points: r0.points || 0, wallet: r0.wallet || 0, cmt: { perCh: cf.perCh, perDay: cf.perDay, today: (td && td.n) || 0, pts: cf.pts } }); }
+  if (path === '/api/me/checkin' && m === 'POST') return json({ ok: true, ...(await streakCheckin(env, user.id)) });
+  if (path === '/api/me/alert' && m === 'POST') {
+    const b = await body(request, 1000), nid = str(b.novel, 60), ch = Number.isInteger(+b.chapter) ? Math.max(0, Math.min(9999, +b.chapter)) : -1;
+    if (!/^[A-Za-z0-9_-]{1,60}$/.test(nid) || ch < 0) return fail('فصل غير صحيح');
+    if (b.on === false) { await env.DB.prepare('DELETE FROM ch_alerts WHERE uid=? AND nid=? AND ch=?').bind(user.id, nid, ch).run(); return json({ ok: true, on: false }); }
+    let rel = relOf(b.release); const mm = /^u(\d+)$/.exec(nid);
+    if (mm) { const nv = await env.DB.prepare('SELECT l_extra FROM novels WHERE id=? AND is_live=1').bind(+mm[1]).first(); rel = nv ? (extraOf(nv.l_extra).rel[ch] || 0) : 0; }
+    if (!rel || rel <= Date.now()) return fail('الفصل ده نزل خلاص أو مش مجدول');
+    if (await tooMany(env, 'alr:' + user.id, 60, 3600000)) return fail('كتير أوي، استنى شوية', 429);
+    await noteAttempt(env, 'alr:' + user.id);
+    await env.DB.prepare('INSERT INTO ch_alerts (uid,nid,ch,rel,title,sent) VALUES (?,?,?,?,?,0) ON CONFLICT(uid,nid,ch) DO UPDATE SET rel=excluded.rel,title=excluded.title,sent=0').bind(user.id, nid, ch, rel, str(b.title, 160)).run();
+    return json({ ok: true, on: true });
+  }
+  if (path === '/api/me/alerts' && m === 'GET') { const { results } = await env.DB.prepare('SELECT nid,ch,rel FROM ch_alerts WHERE uid=? AND sent=0 ORDER BY rel LIMIT 200').bind(user.id).all(); return json({ alerts: results.map((a) => ({ novel: a.nid, chapter: a.ch, release: a.rel })) }); }
+  if (path === '/api/me/points' && m === 'GET') { const r0 = await env.DB.prepare('SELECT points,wallet FROM users WHERE id=?').bind(user.id).first() || {}; const cf = await cmtConf(env), td = await env.DB.prepare('SELECT COUNT(*) AS n FROM cmt_log WHERE uid=? AND day=?').bind(user.id, cairoDay()).first(); const sk = await env.DB.prepare('SELECT last,cur FROM streaks WHERE uid=?').bind(user.id).first(), sc0 = await streakConf(env); return json({ points: r0.points || 0, wallet: r0.wallet || 0, streak: { on: sc0.on, days: sc0.days, pts: sc0.pts, cur: sk ? sk.cur : 0, today: !!(sk && sk.last === cairoDay()) }, cmt: { perCh: cf.perCh, perDay: cf.perDay, today: (td && td.n) || 0, pts: cf.pts } }); }
   if (path === '/api/cmt/gate' && m === 'POST') {
     const b = await body(request, 3000), cf = await cmtConf(env), nid = str(b.novel, 60), ch = Number.isInteger(+b.chapter) ? Math.max(-1, Math.min(9999, +b.chapter)) : -1, text = str(b.text, 1000).trim();
     if (!/^[A-Za-z0-9_-]{1,60}$/.test(nid)) return fail('رواية غير صحيحة');
@@ -1357,7 +1441,7 @@ async function route(request, env) {
     if (!row) return fail('الرواية غير موجودة', 404);
     if (m === 'GET') {
       const { results } = await env.DB.prepare("SELECT title,content,locked FROM chapters WHERE novel_id=? AND ver='d' ORDER BY idx").bind(id).all();
-      return json({ novel: { ...myNovelRow(row), chapters: results.map((c) => ({ title: c.title, content: c.content, locked: !!c.locked })) } });
+      return json({ novel: { ...myNovelRow(row), chapters: results.map((c, i) => ({ title: c.title, content: c.content, locked: !!c.locked, release: extraOf(row.d_extra).rel[i] || 0 })) } });
     }
     if (m === 'PUT') {
       const n = cleanNovel(await body(request));
@@ -1424,7 +1508,7 @@ async function route(request, env) {
       const r = await env.DB.prepare('SELECT n.*,u.name AS owner,u.email AS owner_email FROM novels n JOIN users u ON u.id=n.user_id WHERE n.id=?').bind(+g[1]).first();
       if (!r) return fail('غير موجودة', 404);
       const { results } = await env.DB.prepare("SELECT title,content,locked FROM chapters WHERE novel_id=? AND ver='d' ORDER BY idx").bind(+g[1]).all();
-      return json({ novel: { ...myNovelRow(r), owner: r.owner, ownerEmail: r.owner_email, chapters: results.map((c) => ({ title: c.title, content: c.content, locked: !!c.locked })) } });
+      return json({ novel: { ...myNovelRow(r), owner: r.owner, ownerEmail: r.owner_email, chapters: results.map((c, i) => ({ title: c.title, content: c.content, locked: !!c.locked, release: extraOf(r.d_extra).rel[i] || 0 })) } });
     }
     if ((g = /^\/api\/admin\/novels\/(\d+)\/approve$/.exec(path)) && m === 'POST') {
       const id = +g[1];
@@ -1647,6 +1731,8 @@ async function route(request, env) {
       const { results: draws } = await env.DB.prepare('SELECT week,user_id,name,points,prize,ts FROM pts_draws ORDER BY week DESC LIMIT 12').all();
       return json({ prize: pts.prize || 0, start: pts.start || '', week: weekStart(), nextDraw: weekEndMs(weekStart()), top, draws });
     }
+    if (path === '/api/admin/streak' && m === 'GET') return json(await streakConf(env));
+    if (path === '/api/admin/streak' && m === 'PUT') { const b = await body(request, 300), cur = await streakConf(env); await setSetting(env, 'streak', { on: b.on == null ? cur.on : !!b.on, days: b.days == null ? cur.days : b.days, pts: b.pts == null ? cur.pts : b.pts }); return json(await streakConf(env)); }
     if (path === '/api/admin/points' && m === 'PUT') { const b = await body(request, 300), pts = await getSetting(env, 'pts'); await setSetting(env, 'pts', { ...pts, prize: Math.max(0, Math.min(1e7, Number(b.prize) || 0)) }); return json({ ok: true }); }
     if (path === '/api/admin/reads/reset' && m === 'POST') {
       const b = await body(request, 500);
@@ -1850,7 +1936,7 @@ async function route(request, env) {
       const r = await env.DB.prepare('SELECT n.*,u.name AS owner FROM novels n JOIN users u ON u.id=n.user_id WHERE n.id=? AND n.is_live=1').bind(+g[1]).first();
       if (!r) return fail('الرواية مش منشورة', 404);
       const { results } = await env.DB.prepare("SELECT title,content,locked FROM chapters WHERE novel_id=? AND ver='l' ORDER BY idx").bind(+g[1]).all();
-      return json({ novel: { ...liveNovelRow(r), owner: r.owner, uid: r.user_id, chapters: results.map((c) => ({ title: c.title, content: c.content, locked: !!c.locked })) } });
+      return json({ novel: { ...liveNovelRow(r), owner: r.owner, uid: r.user_id, chapters: results.map((c, i) => ({ title: c.title, content: c.content, locked: !!c.locked, release: extraOf(r.l_extra).rel[i] || 0 })) } });
     }
     if ((g = /^\/api\/admin\/novels\/(\d+)$/.exec(path)) && m === 'DELETE') {
       await env.DB.batch([env.DB.prepare('DELETE FROM chapters WHERE novel_id=?').bind(+g[1]), env.DB.prepare('DELETE FROM novels WHERE id=?').bind(+g[1])]);
