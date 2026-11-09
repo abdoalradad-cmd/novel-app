@@ -137,6 +137,7 @@ async function ensureSchema(env) {
     "CREATE TABLE IF NOT EXISTS contest_answers (id INTEGER PRIMARY KEY AUTOINCREMENT, week TEXT NOT NULL, user_id INTEGER NOT NULL, answers TEXT NOT NULL DEFAULT '[]', ts INTEGER NOT NULL DEFAULT 0)",
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_contest_ans ON contest_answers(week, user_id)',
     'CREATE TABLE IF NOT EXISTS pts_votes (voter INTEGER NOT NULL, nid TEXT NOT NULL, ch INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (voter, nid, ch))',
+    "CREATE TABLE IF NOT EXISTS wal_log (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, day TEXT NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, amt REAL NOT NULL DEFAULT 0, ts INTEGER NOT NULL DEFAULT 0, UNIQUE(uid,kind,ref))",
     "CREATE TABLE IF NOT EXISTS streaks (uid INTEGER PRIMARY KEY, last TEXT NOT NULL DEFAULT '', cur INTEGER NOT NULL DEFAULT 0, awards INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS ch_alerts (uid INTEGER NOT NULL, nid TEXT NOT NULL, ch INTEGER NOT NULL, rel INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', sent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (uid, nid, ch))",
     'CREATE INDEX IF NOT EXISTS ch_alerts_due ON ch_alerts (sent, rel)',
@@ -828,14 +829,14 @@ async function fansOf(env, author) {
   const nm = {}; us.forEach((u) => { nm[u.id] = u.name; });
   return top.map((x, i) => ({ uid: x.uid, name: nm[x.uid] || '', score: x.score, rank: i + 1, ...fanTier(x.score, i + 1) })).filter((x) => x.tier && x.name);
 }
-async function streakConf(env) { const c = await getSetting(env, 'streak'); const n = (v, d, a, z) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(z, v)) : d; }; return { on: c.on !== false, days: Math.round(n(c.days, 7, 2, 60)), pts: n(c.pts, 3, 0, 1000) }; }
+async function streakConf(env) { const c = await getSetting(env, 'streak'); const n = (v, d, a, z) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(z, v)) : d; }; return { on: c.on !== false, days: Math.round(n(c.days, 7, 2, 60)), pts: 2 }; }
 async function streakCheckin(env, uid) {
   const sc = await streakConf(env), today = cairoDay(), yest = new Date(Date.parse(today + 'T00:00:00Z') - DAYMS).toISOString().slice(0, 10);
   const r = await env.DB.prepare('SELECT last,cur,awards FROM streaks WHERE uid=?').bind(uid).first();
   if (!sc.on) return { on: false, cur: r ? r.cur : 0, days: sc.days, pts: sc.pts, awarded: 0 };
   if (r && r.last === today) return { on: true, cur: r.cur || 0, days: sc.days, pts: sc.pts, awarded: 0, today: true, shown: r.cur || sc.days };
   let cur = r && r.last === yest ? r.cur + 1 : 1, awarded = 0, awards = r ? r.awards : 0;
-  const shown = cur; if (cur >= sc.days) { awarded = sc.pts; awards++; cur = 0; }
+  const shown = cur; if (cur >= sc.days) { awarded = sc.pts * (await walMult(env, uid)); awards++; cur = 0; }
   let ok;
   if (r) { const u = await env.DB.prepare('UPDATE streaks SET last=?,cur=?,awards=? WHERE uid=? AND last<>?').bind(today, cur, awards, uid, today).run(); ok = !!(u && u.meta && u.meta.changes); }
   else { const u = await env.DB.prepare('INSERT OR IGNORE INTO streaks (uid,last,cur,awards) VALUES (?,?,?,?)').bind(uid, today, cur, awards).run(); ok = !!(u && u.meta && u.meta.changes); }
@@ -873,12 +874,23 @@ async function cmtConf(env) { const c = await getSetting(env, 'cmt'); const n = 
 const normTxt = (t) => String(t).toLowerCase().replace(/[\u064B-\u065F\u0670\u0640]/g, '').replace(/[أإآ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
 const jacc = (a, b) => { const x = new Set(a.split(' ')), y = new Set(b.split(' ')); let i = 0; x.forEach((w) => { if (y.has(w)) i++; }); const u = x.size + y.size - i; return u ? i / u : 0; };
 const fnv = (t) => { let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); };
-async function awardCmt(env, uid, logId, conf) {
-  const got = await env.DB.prepare('SELECT COUNT(*) AS n FROM cmt_log WHERE uid=? AND day=? AND awarded=1').bind(uid, cairoDay()).first();
-  if ((got && got.n) >= conf.dayPts || conf.pts <= 0) return 0;
-  const r = await env.DB.prepare('UPDATE cmt_log SET awarded=1 WHERE id=? AND awarded=0').bind(logId).run();
-  if (r && r.meta && r.meta.changes) { await env.DB.prepare('UPDATE users SET wallet=ROUND(wallet+?,1) WHERE id=?').bind(conf.pts, uid).run(); return conf.pts; }
+const WAL_PT = 0.1, WAL_DAY = 3; // كل تقييم/تعليق = 0.1 نقطة، وبحد أقصى 3 مرات في اليوم (تعليق + تصويت مع بعض)
+async function walMult(env, uid) { const u = await env.DB.prepare('SELECT role,premium_until FROM users WHERE id=?').bind(uid).first(); return isPremium(u) ? 2 : 1; }
+async function walAward(env, uid, kind, ref) { // مصدر النقاط الوحيد للقارئ: vote / comment (+ streak لوحده)
+  const day = cairoDay();
+  const got = await env.DB.prepare("SELECT COUNT(*) AS n FROM wal_log WHERE uid=? AND day=? AND kind IN ('vote','comment')").bind(uid, day).first();
+  if ((got && got.n) >= WAL_DAY) return 0;
+  const amt = Math.round(WAL_PT * (await walMult(env, uid)) * 10) / 10;
+  const r = await env.DB.prepare('INSERT OR IGNORE INTO wal_log (uid,day,kind,ref,amt,ts) VALUES (?,?,?,?,?,?)').bind(uid, day, kind, String(ref), amt, Date.now()).run();
+  if (r && r.meta && r.meta.changes) { await env.DB.prepare('UPDATE users SET wallet=ROUND(wallet+?,1) WHERE id=?').bind(amt, uid).run(); return amt; }
   return 0;
+}
+async function awardCmt(env, uid, logId) {
+  const r = await env.DB.prepare('UPDATE cmt_log SET awarded=1 WHERE id=? AND awarded=0').bind(logId).run();
+  if (!(r && r.meta && r.meta.changes)) return 0;
+  const p = await walAward(env, uid, 'comment', logId);
+  if (!p) await env.DB.prepare('UPDATE cmt_log SET awarded=0 WHERE id=?').bind(logId).run();
+  return p;
 }
 function weekStart(t = Date.now()) { // أول يوم في الأسبوع = السبت (بتوقيت مصر تقريبًا)
   const d = new Date(t + 2 * 3600000), back = (d.getUTCDay() + 1) % 7;
@@ -1181,7 +1193,7 @@ async function route(request, env) {
     return json({ ok: true, on: true });
   }
   if (path === '/api/me/alerts' && m === 'GET') { const { results } = await env.DB.prepare('SELECT nid,ch,rel FROM ch_alerts WHERE uid=? AND sent=0 ORDER BY rel LIMIT 200').bind(user.id).all(); return json({ alerts: results.map((a) => ({ novel: a.nid, chapter: a.ch, release: a.rel })) }); }
-  if (path === '/api/me/points' && m === 'GET') { const r0 = await env.DB.prepare('SELECT points,wallet FROM users WHERE id=?').bind(user.id).first() || {}; const cf = await cmtConf(env), td = await env.DB.prepare('SELECT COUNT(*) AS n FROM cmt_log WHERE uid=? AND day=?').bind(user.id, cairoDay()).first(); const sk = await env.DB.prepare('SELECT last,cur FROM streaks WHERE uid=?').bind(user.id).first(), sc0 = await streakConf(env); return json({ points: r0.points || 0, wallet: r0.wallet || 0, streak: { on: sc0.on, days: sc0.days, pts: sc0.pts, cur: sk ? sk.cur : 0, today: !!(sk && sk.last === cairoDay()) }, cmt: { perCh: cf.perCh, perDay: cf.perDay, today: (td && td.n) || 0, pts: cf.pts } }); }
+  if (path === '/api/me/points' && m === 'GET') { const r0 = await env.DB.prepare('SELECT points,wallet FROM users WHERE id=?').bind(user.id).first() || {}; const cf = await cmtConf(env), td = await env.DB.prepare("SELECT COUNT(*) AS n FROM wal_log WHERE uid=? AND day=? AND kind IN ('vote','comment')").bind(user.id, cairoDay()).first(), mu = await walMult(env, user.id); const sk = await env.DB.prepare('SELECT last,cur FROM streaks WHERE uid=?').bind(user.id).first(), sc0 = await streakConf(env); return json({ points: r0.points || 0, wallet: r0.wallet || 0, mult: mu, earn: { per: WAL_PT * mu, max: WAL_DAY, today: (td && td.n) || 0 }, streak: { on: sc0.on, days: sc0.days, pts: sc0.pts * mu, cur: sk ? sk.cur : 0, today: !!(sk && sk.last === cairoDay()) }, cmt: { perCh: cf.perCh, perDay: cf.perDay, today: (td && td.n) || 0, pts: cf.pts } }); }
   if (path === '/api/cmt/gate' && m === 'POST') {
     const b = await body(request, 3000), cf = await cmtConf(env), nid = str(b.novel, 60), ch = Number.isInteger(+b.chapter) ? Math.max(-1, Math.min(9999, +b.chapter)) : -1, text = str(b.text, 1000).trim();
     if (!/^[A-Za-z0-9_-]{1,60}$/.test(nid)) return fail('رواية غير صحيحة');
@@ -1206,9 +1218,7 @@ async function route(request, env) {
     const ins = await env.DB.prepare('INSERT INTO cmt_log (uid,nid,ch,norm,day,ts,elig,awarded) VALUES (?,?,?,?,?,?,?,0)').bind(user.id, nid, ch, norm, day, Date.now(), elig).run();
     let pts = 0, hint = why;
     if (elig) {
-      const vt = await env.DB.prepare('SELECT 1 AS x FROM pts_votes WHERE voter=? AND nid=? AND ch=?').bind(user.id, nid, ch).first();
-      if (vt) { pts = await awardCmt(env, user.id, ins.meta.last_row_id, cf); if (!pts) hint = 'وصلت للحد اليومي للنقاط'; }
-      else hint = 'قيّم الفصل بنجوم كمان وهتاخد النقطة ⭐';
+      pts = await awardCmt(env, user.id, ins.meta.last_row_id); if (!pts) hint = 'وصلت للحد اليومي للنقاط (3 مرات في اليوم)';
     }
     return json({ ok: true, points: pts, hint });
   }
@@ -1303,7 +1313,7 @@ async function route(request, env) {
       const ins = await env.DB.prepare('INSERT OR IGNORE INTO pts_votes (voter,nid,ch,ts) VALUES (?,?,?,?)').bind(user.id, ref, ch, Date.now()).run();
       if (ins && ins.meta && ins.meta.changes) {
         await env.DB.prepare('UPDATE users SET points=ROUND(points+?,1) WHERE id=?').bind(PT_PER_VOTE, target).run();
-        try { const pc = await env.DB.prepare('SELECT id FROM cmt_log WHERE uid=? AND nid=? AND ch=? AND elig=1 AND awarded=0 ORDER BY id LIMIT 1').bind(user.id, ref, ch).first(); if (pc) await awardCmt(env, user.id, pc.id, await cmtConf(env)); } catch (e) {}
+        try { await walAward(env, user.id, 'vote', ref + '|' + ch); } catch (e) {}
       }
     }
     const title = str(b.title, 120).trim(), stars = Math.max(1, Math.min(5, +b.stars || 5));
