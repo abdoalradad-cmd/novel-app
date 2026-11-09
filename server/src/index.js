@@ -843,6 +843,19 @@ async function streakCheckin(env, uid) {
   if (awarded > 0) await env.DB.prepare('UPDATE users SET wallet=ROUND(wallet+?,1) WHERE id=?').bind(awarded, uid).run();
   return { on: true, cur, shown, days: sc.days, pts: sc.pts, awarded, awards, today: false };
 }
+
+async function releasesTick(env) { // من الـ Cron: فصل مجدول حان ميعاده => إشعار «فصل جديد» للمتابعين (الإشعار الأول كان مؤجّل لحد ما ينزل فعلًا)
+  const now = Date.now(), last = (await getSetting(env, 'rel_tick')).t || 0;
+  await setSetting(env, 'rel_tick', { t: now });
+  if (!last) return;
+  const { results } = await env.DB.prepare("SELECT n.id,n.user_id,n.l_title,n.l_extra,u.name,u.role FROM novels n JOIN users u ON u.id=n.user_id WHERE n.is_live=1 AND n.l_extra LIKE '%\"rel\"%'").all();
+  for (const r of results) {
+    const rel = extraOf(r.l_extra).rel; let hit = -1; rel.forEach((v, i) => { if (v > last && v <= now && i > hit) hit = i; });
+    if (hit < 0) continue;
+    await env.DB.prepare('INSERT INTO events (author_id,kind,novel_id,title,ts) VALUES (?,?,?,?,?)').bind(r.user_id, 'chapter', r.id, r.l_title, now).run();
+    if (env.FCM_SA) { const c = await env.DB.prepare("SELECT title FROM chapters WHERE novel_id=? AND ver='l' AND idx=?").bind(r.id, hit).first(); await sendPush(env, 'فصل جديد من ' + r.name, '«' + r.l_title + '»' + (c ? ' — ' + c.title : ''), '', r.role === 'admin' ? 'all' : 'a_' + r.user_id); }
+  }
+}
 async function alertsTick(env) { // من الـ Cron: لما يحين ميعاد فصل مجدول يتبعت إشعار لكل اللي ضغطوا «نبهني»
   const now = Date.now(), { results } = await env.DB.prepare('SELECT uid,nid,ch,title FROM ch_alerts WHERE sent=0 AND rel>0 AND rel<=? LIMIT 300').bind(now).all();
   for (const a of results) {
@@ -945,7 +958,7 @@ export default {
   },
   // كل دقيقة: يكمّل تحويل الفصول في الطابور (بحد يومي)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureSchema(env); env = await withKeys(env); try { await ptsTick(env); } catch (e) {} try { await alertsTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM notes WHERE ts<?').bind(Date.now() - 30 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM visits WHERE day<?').bind(dayKey(Date.now() - 45 * 86400000)).run(); await env.DB.prepare('DELETE FROM presence WHERE seen<?').bind(Date.now() - 2 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) { try { await ttsRebalance(env); } catch (e) {} await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureSchema(env); env = await withKeys(env); try { await ptsTick(env); } catch (e) {} try { await alertsTick(env); } catch (e) {} try { await releasesTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM notes WHERE ts<?').bind(Date.now() - 30 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM visits WHERE day<?').bind(dayKey(Date.now() - 45 * 86400000)).run(); await env.DB.prepare('DELETE FROM presence WHERE seen<?').bind(Date.now() - 2 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) { try { await ttsRebalance(env); } catch (e) {} await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } } catch (e) {} })());
   }
 };
 
@@ -1523,7 +1536,8 @@ async function route(request, env) {
       try { if (extraOf(r.d_extra).siteId) await applyServerVault(env); } catch (e) {}
       try {
         const newCnt = (await env.DB.prepare("SELECT COUNT(*) AS n FROM chapters WHERE novel_id=? AND ver='l'").bind(id).first()).n;
-        const kind = !r.is_live ? 'novel' : (newCnt > oldCnt ? 'chapter' : '');
+        const hidden = (ex, cnt) => extraOf(ex).rel.slice(0, cnt).filter((v) => v > now).length; // الفصول المجدولة ما بتتحسبش «فصل جديد» لحد ما ينزل ميعادها
+        const kind = !r.is_live ? 'novel' : (newCnt - hidden(r.d_extra, newCnt) > oldCnt - hidden(r.l_extra, oldCnt) ? 'chapter' : '');
         if (kind) {
           const au = await env.DB.prepare('SELECT id,name,role FROM users WHERE id=?').bind(r.user_id).first();
           await env.DB.prepare('INSERT INTO events (author_id,kind,novel_id,title,ts) VALUES (?,?,?,?,?)').bind(r.user_id, kind, id, r.d_title, now).run();
