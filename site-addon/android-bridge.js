@@ -111,24 +111,223 @@
   /* ---------- 3) تحميل الرواية PDF: طباعة أندرويد الأصلية (تدعم العربي والروايات الطويلة) ---------- */
   var origPrint = window.print ? window.print.bind(window) : null;
   window.print = function () {
-    if (!nativeOK('AppNative')) { if (origPrint) origPrint(); return; }
+    if (!nativeOK('AppNative')) {
+      toast('تحميل PDF يحتاج النسخة الأحدث من التطبيق. ثبّت آخر APK بعد مسح القديم.');
+      return;
+    }
     var pa = document.getElementById('print-area');
     var inner = pa ? pa.innerHTML : '';
     if (!inner) { if (origPrint) origPrint(); return; }
+    sendToNativePrint(inner, novelTitle());
+  };
+  function novelTitle() {
     var nid = G('currentNovelId'), list = G('novels') || [], title = 'رواية';
     for (var i = 0; i < list.length; i++) if (list[i].id === nid) title = 'رواية ' + list[i].title;
-    var doc = '<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">' +
+    return title;
+  }
+  function printDoc(inner) {
+    return '<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width,initial-scale=1">' +
       '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Cairo:wght@400;700;900&display=swap">' +
-      '<style>@page{size:A4;margin:14mm}html,body{margin:0;padding:0;background:#fff}</style></head><body>' + inner + '</body></html>';
-    plugin('AppNative').print({ html: doc, name: title.replace(/[\\/:*?"<>|]+/g, ' ') }).catch(function () { toast('تعذّر تجهيز ملف الـ PDF'); });
-  };
+      '<style>@page{size:A4;margin:14mm}html,body{margin:0;padding:0;background:#fff;direction:rtl}' +
+      '#pw>div{width:auto!important;max-width:640px!important;padding:0!important;margin:0 auto!important;box-sizing:border-box!important}' +
+      '#pw p,#pw h1,#pw h2,#pw h3{overflow-wrap:anywhere}</style></head><body><div id="pw">' + inner + '</div></body></html>';
+  }
+  /* شاشة انتظار واضحة أثناء تجهيز الـ PDF (بدل التهنيج الصامت) */
+  function busy(on) {
+    var el = document.getElementById('rp-busy');
+    if (!on) { if (el) el.remove(); return; }
+    if (el) return;
+    var st = document.getElementById('rp-busy-st');
+    if (!st) {
+      st = document.createElement('style'); st.id = 'rp-busy-st';
+      st.textContent = '@keyframes rpspin{to{transform:rotate(360deg)}}';
+      document.head.appendChild(st);
+    }
+    el = document.createElement('div'); el.id = 'rp-busy';
+    el.style.cssText = 'position:fixed;inset:0;z-index:2147483000;background:rgba(2,44,34,.88);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;color:#fff;font-family:Cairo,sans-serif;font-weight:700;font-size:16px;text-align:center;padding:24px';
+    el.innerHTML = '<div style="width:54px;height:54px;border:5px solid rgba(255,255,255,.25);border-top-color:#fbbf24;border-radius:50%;animation:rpspin .9s linear infinite"></div>' +
+      '<div>جاري تجهيز ملف الـ PDF…<br><span style="font-weight:400;font-size:13px;opacity:.85">اختر «حفظ بتنسيق PDF» من النافذة اللي هتظهر</span></div>';
+    document.body.appendChild(el);
+  }
+  function sendToNativePrint(inner, title) {
+    var n = plugin('AppNative');
+    busy(true);
+    return n.print({ html: printDoc(inner), name: title.replace(/[\\/:*?"<>|]+/g, ' ') })
+      .then(function () { setTimeout(function () { busy(false); }, 400); })
+      .catch(function (e) {
+        busy(false);
+        toast('تعذّر تجهيز ملف الـ PDF: ' + String((e && e.message) || e || ''));
+      });
+  }
+  /* نغلّف triggerPrintPdf الأصلية: شاشة انتظار فورية + #print-area مخفي تمامًا (ظهوره كان بيوسّع الصفحة ويهنّج) */
+  function installFastPdf() {
+    if (!nativeOK('AppNative') || typeof window.triggerPrintPdf !== 'function' || window.triggerPrintPdf.__rp) return;
+    var st = document.createElement('style');
+    st.textContent = '#print-area{display:none!important}';
+    document.head.appendChild(st);
+    var orig = window.triggerPrintPdf;
+    window.triggerPrintPdf = function () {
+      busy(true);
+      requestAnimationFrame(function () { setTimeout(function () {
+        try { orig(); } catch (e) { busy(false); toast('تعذّر تجهيز ملف الـ PDF'); }
+      }, 60); });
+    };
+    window.triggerPrintPdf.__rp = true;
+  }
   window.addEventListener('load', function () {
     // كل أزرار التحميل تمر على الطباعة الأصلية (جودة أفضل من html2canvas)
+    installFastPdf();
     if (nativeOK('AppNative') && typeof window.triggerPrintPdf === 'function') {
       window.generateDirectPdfFromChapters = function () { return window.triggerPrintPdf(); };
     }
   });
+
+  /* ---------- 3.5) صور جوجل درايف: محاولات بديلة لو فشل التحميل داخل التطبيق ---------- */
+  document.addEventListener('error', function (e) {
+    var im = e.target;
+    if (!im || im.tagName !== 'IMG') return;
+    var m = /(?:googleusercontent\.com\/d\/|drive\.google\.com\/(?:uc\?[^"']*id=|thumbnail\?id=|file\/d\/))([\w-]{20,})/.exec(im.src || '');
+    if (!m) return;
+    var tries = parseInt(im.getAttribute('data-try') || '0', 10);
+    var urls = [
+      'https://drive.google.com/thumbnail?id=' + m[1] + '&sz=w1000',
+      'https://lh3.googleusercontent.com/d/' + m[1] + '=w1000',
+      'https://drive.google.com/uc?export=view&id=' + m[1]
+    ];
+    if (tries >= urls.length) return;
+    im.setAttribute('data-try', String(tries + 1));
+    im.referrerPolicy = 'no-referrer';
+    im.src = urls[tries];
+  }, true);
+
+  /* ---------- شاشة بداية RadPad داخل الصفحة (تظهر حتى يكتمل تحميل الموقع) ---------- */
+  (function () {
+    var start = Date.now(), hidden = false, el = document.createElement('div');
+    el.id = 'rp-splash';
+    el.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483000;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#065f46,#022c22);color:#fff;font-family:Poppins,system-ui,-apple-system,Roboto,sans-serif;transition:opacity .45s ease;direction:ltr';
+    el.innerHTML = '<div style="width:104px;height:104px;border-radius:28px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.22);display:flex;align-items:center;justify-content:center">' +
+      '<svg width="50" viewBox="62 -702 551 702" aria-hidden="true"><path transform="scale(1,-1)" fill="#fff" d="M420 0 274 265H233V0H62V702H349Q432 702 490.5 673.0Q549 644 578.0 593.5Q607 543 607 481Q607 411 567.5 356.0Q528 301 451 278L613 0ZM233 386H339Q386 386 409.5 409.0Q433 432 433 474Q433 514 409.5 537.0Q386 560 339 560H233Z"/></svg></div>' +
+      '<div style="font-weight:800;font-size:34px;margin-top:20px;letter-spacing:.3px">RadPad</div>' +
+      '<div style="font-size:11px;margin-top:12px;opacity:.65;letter-spacing:.4px">powered by Abdelrahman Alradad</div>';
+    whenRoot(function () { document.documentElement.appendChild(el); });
+    function hide() {
+      if (hidden) return;
+      hidden = true;
+      setTimeout(function () {
+        el.style.opacity = '0';
+        setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 500);
+      }, Math.max(0, 1100 - (Date.now() - start)));
+    }
+    if (document.readyState === 'complete') hide(); else window.addEventListener('load', hide);
+    setTimeout(hide, 9000);
+  })();
+
+  /* ---------- العمل بدون إنترنت: Service Worker (الملف sw.js بجانب index.html) ---------- */
+  window.addEventListener('load', function () {
+    if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+    var base = location.pathname.replace(/[^\/]*$/, '');
+    navigator.serviceWorker.register(base + 'sw.js', { scope: base }).then(function () {
+      return navigator.serviceWorker.ready;
+    }).then(function (reg) {
+      var done = false;
+      try { done = localStorage.getItem('__sw_pre_v1') === '1'; } catch (e) {}
+      if (done) return;
+      // أول مرة: خزّن كل ما حمّلته الصفحة (الروايات والخطوط والصور) ليعمل التطبيق بدون إنترنت
+      setTimeout(function () {
+        var urls = [location.origin + base];
+        try { performance.getEntriesByType('resource').forEach(function (r) { urls.push(r.name); }); } catch (e) {}
+        var sw = reg.active || navigator.serviceWorker.controller;
+        if (sw) { sw.postMessage({ type: 'precache', urls: urls }); try { localStorage.setItem('__sw_pre_v1', '1'); } catch (e) {} }
+      }, 6000);
+    }).catch(function (e) { window.__swErr = String((e && e.message) || e || 'خطأ'); });
+  });
+
+  /* ---------- تنبيه الإصدار الجديد + تحميل مباشر ---------- */
+  function cmpVer(a, b) {
+    var x = String(a).split('.'), y = String(b).split('.'), n = Math.max(x.length, y.length);
+    for (var i = 0; i < n; i++) {
+      var p = parseInt(x[i] || '0', 10) || 0, q = parseInt(y[i] || '0', 10) || 0;
+      if (p !== q) return p > q ? 1 : -1;
+    }
+    return 0;
+  }
+  function directUrl(u) {
+    var m = /drive\.google\.com\/file\/d\/([\w-]+)/.exec(u) || /drive\.google\.com\/(?:open|uc)\?[^#]*\bid=([\w-]+)/.exec(u);
+    return m ? 'https://drive.google.com/uc?export=download&id=' + m[1] : u;
+  }
+  function openDownload(u) {
+    u = directUrl(u);
+    var br = plugin('Browser');
+    if (br && br.open) { br.open({ url: u }); return; }
+    window.open(u, '_blank');
+  }
+  var updShown = false;
+  function showUpdate(newV, curV, url) {
+    if (updShown || document.getElementById('rp-upd')) return;
+    updShown = true;
+    var el = document.createElement('div'); el.id = 'rp-upd';
+    el.style.cssText = 'position:fixed;inset:0;z-index:2147483200;background:rgba(2,20,16,.78);display:flex;align-items:center;justify-content:center;padding:22px;direction:rtl;font-family:Cairo,system-ui,sans-serif';
+    el.innerHTML = '<div style="width:100%;max-width:360px;background:#fff;color:#0f172a;border-radius:26px;padding:26px 22px 18px;text-align:center;box-shadow:0 24px 60px rgba(0,0,0,.45)">' +
+      '<div style="width:68px;height:68px;margin:0 auto 14px;border-radius:20px;background:linear-gradient(135deg,#34d399,#065f46);display:flex;align-items:center;justify-content:center;color:#fff;font-size:30px">⬇</div>' +
+      '<div style="font-weight:900;font-size:1.2rem;margin-bottom:8px">يوجد إصدار جديد من التطبيق</div>' +
+      '<div style="font-size:.9rem;line-height:1.9;color:#475569;margin-bottom:16px">إصدارك الحالي <b dir="ltr">' + curV + '</b> والإصدار الجديد <b dir="ltr">' + newV + '</b>.<br>حمّل التحديث علشان تستمتع بآخر الميزات والإصلاحات.</div>' +
+      '<button id="rp-upd-go" style="width:100%;border:0;border-radius:16px;padding:14px;font:900 1rem Cairo,sans-serif;color:#fff;background:linear-gradient(135deg,#065f46,#022c22);box-shadow:0 8px 20px rgba(2,44,34,.35)">تحميل الإصدار الجديد</button>' +
+      '<button id="rp-upd-later" style="margin-top:10px;border:0;background:none;color:#94a3b8;font:700 .8rem Cairo,sans-serif;padding:6px 12px">لاحقًا</button></div>';
+    document.body.appendChild(el);
+    el.querySelector('#rp-upd-go').onclick = function () {
+      if (!url) { toast('رابط التحميل غير مُعدّ بعد'); return; }
+      openDownload(url);
+    };
+    el.querySelector('#rp-upd-later').onclick = function () { el.remove(); };
+  }
+  /* آخر إعدادات محفوظة من الـ Service Worker (أحدث من نسخة الصفحة المعروضة لو الصفحة جت من كاش قديم) */
+  function swCfg() {
+    return fetch(new URL('__rp_cfg', document.baseURI).href, { cache: 'no-store' }).then(function (r) { return r.json(); }).catch(function () { return {}; });
+  }
+  function checkUpdate(tries) {
+    var c = G('siteConfig');
+    if (!c) { if (tries < 10) setTimeout(function () { checkUpdate(tries + 1); }, 1000); return; }
+    var app = plugin('App');
+    if (!app || !app.getInfo) return;
+    Promise.all([app.getInfo(), swCfg()]).then(function (r) {
+      var cur = String((r[0] && r[0].version) || '0'), s = r[1] || {};
+      var v = String(c.appVersion || '').trim(), url = String(c.appDownloadUrl || '').trim();
+      var sv = String(s.appVersion || '').trim();
+      if (sv && (!v || cmpVer(sv, v) > 0)) { v = sv; url = String(s.appDownloadUrl || '').trim() || url; }
+      if (!v) return;
+      if (cmpVer(v, cur) > 0) showUpdate(v, cur, url);
+    }).catch(function () {});
+  }
+  window.addEventListener('load', function () { setTimeout(function () { checkUpdate(0); }, 2800); setTimeout(function () { checkUpdate(5); }, 12000); setInterval(function () { if (!document.hidden && !updShown) checkUpdate(5); }, 90000); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && !updShown) setTimeout(function () { checkUpdate(5); }, 600); });
+
+  /* ---------- تشخيص: اضغط مطولًا على عنوان الموقع (ثانيتين) ---------- */
+  var BRIDGE_VERSION = '2026-10-28.1';
+  (function () {
+    var t = null;
+    function start(e) {
+      if (!e.target || !e.target.closest || !e.target.closest('#header-site-title')) return;
+      clearTimeout(t);
+      t = setTimeout(function () {
+        var base = 'نسخة ' + BRIDGE_VERSION + ' | أصلية: ' + (nativeOK('AppNative') ? '✅' : '❌');
+        try { var ap = plugin('App'); if (ap && ap.getInfo) ap.getInfo().then(function (i) { window.__appVer = i && i.version; }); if (window.__appVer) base += ' | تطبيق v' + window.__appVer; } catch (e) {}
+        if (!('serviceWorker' in navigator)) { toast(base + ' | أوفلاين: غير مدعوم ❌'); return; }
+        navigator.serviceWorker.getRegistrations().then(function (regs) {
+          return (window.caches ? caches.keys() : Promise.resolve([])).then(function (ks) {
+            return Promise.all(ks.map(function (k) { return caches.open(k).then(function (c) { return c.keys(); }); })).then(function (all) {
+              var n = all.reduce(function (a, b) { return a + b.length; }, 0);
+              toast(base + ' | أوفلاين: تسجيل ' + (regs.length ? '✅' : '❌') + ' / تحكم ' + (navigator.serviceWorker.controller ? '✅' : '❌') + ' / ملفات محفوظة ' + n + (window.__swErr ? ' / خطأ: ' + window.__swErr : ''));
+            });
+          });
+        }).catch(function (e) { toast(base + ' | أوفلاين خطأ: ' + e); });
+      }, 1800);
+    }
+    function stop() { clearTimeout(t); }
+    document.addEventListener('touchstart', start, { passive: true });
+    document.addEventListener('touchend', stop, { passive: true });
+    document.addEventListener('touchmove', stop, { passive: true });
+  })();
 
   /* ---------- 4) الروابط الخارجية ---------- */
   function openExternal(url) {
@@ -189,6 +388,8 @@
   }
   function handleBack() {
     if (typeof window.__appBack === 'function' && window.__appBack()) return;
+    if (typeof window.__rpAcctBack === 'function' && window.__rpAcctBack()) return;
+    if (typeof window.__rpNotifIsOpen === 'function' && window.__rpNotifIsOpen()) { window.rpCloseNotifications(); return; }
     var modals = [
       ['secret-pin-modal', 'closeSecretPinModal'],
       ['content-password-modal', 'closeContentPasswordModal'],
@@ -224,8 +425,8 @@
   /* ---- أساس ---- */
   'html.is-native-app{--sat:0px;-webkit-tap-highlight-color:transparent;overscroll-behavior-y:none;scroll-padding-top:calc(var(--sat) + 12px)}',
   'html.is-native-app body{-webkit-touch-callout:none;padding-top:var(--sat);padding-bottom:calc(72px + env(safe-area-inset-bottom,0px))}',
-  'html.is-native-app button,html.is-native-app a,html.is-native-app nav{-webkit-user-select:none;user-select:none}',
-  'html.is-native-app .novel-text,html.is-native-app #reader-paper,html.is-native-app input,html.is-native-app textarea{-webkit-user-select:text;user-select:text}',
+  'html.is-native-app body *{-webkit-user-select:none;user-select:none}',
+  'html.is-native-app #reader-paper,html.is-native-app #reader-paper *,html.is-native-app input,html.is-native-app textarea,html.is-native-app [contenteditable]{-webkit-user-select:text;user-select:text}',
   'html.is-native-app main{padding:14px 14px 24px!important}',
   'html.is-native-app footer{display:none!important}',
   'html.is-native-app #nx-shelves{display:none!important}',
@@ -240,18 +441,23 @@
   /* ---- الهيدر: شريط أخضر يتحرك مع الصفحة ---- */
   'html.is-native-app header.sticky{position:relative!important;top:auto!important;background:linear-gradient(135deg,var(--brand-primary),var(--brand-primary-dark))!important;border:0!important;border-radius:0 0 26px 26px;box-shadow:0 6px 24px rgba(2,44,34,.35)!important;backdrop-filter:none!important}',
   'html.is-native-app header.sticky>div:first-child{height:60px!important;padding-left:14px!important;padding-right:14px!important}',
-  'html.is-native-app header #header-site-title{color:#fff!important;font-size:1.02rem!important;line-height:1.3}',
+  'html.is-native-app header #header-site-title{font-size:0!important;line-height:1.3;color:#fff!important}',
+  'html.is-native-app header #header-site-title::after{content:"RadPad";font-family:Poppins,Cairo,system-ui,sans-serif;font-size:1.45rem;font-weight:800;letter-spacing:.3px;color:#fff}',
   'html.is-native-app header #header-site-subtitle{display:none!important}',
-  'html.is-native-app header [onclick*="navigateTo"]>div:first-child{width:2.5rem!important;height:2.5rem!important;border-radius:.9rem!important;background:rgba(255,255,255,.14)!important;border-color:rgba(255,255,255,.25)!important}',
+  'html.is-native-app header [onclick*="navigateTo"]>div:first-child{width:2.7rem!important;height:2.7rem!important;background:none!important;border:0!important;box-shadow:none!important}',
+  'html.is-native-app header [onclick*="navigateTo"]>div:first-child svg{width:100%;height:100%}',
   'html.is-native-app header button{background:rgba(255,255,255,.14)!important;color:#fcd34d!important;border:0!important}',
   'html.is-native-app header button.admin-only-ui{color:#fff!important}',
-  'html.is-native-app header>div:nth-child(2){padding:0 14px 14px!important}',
+  'html.is-native-app header>div:nth-child(2){display:none!important}',
+  'html.is-native-app header button:not(#rp-bell){display:none!important}',
+  'html.is-native-app header #rp-bell{width:2.6rem!important;height:2.6rem!important;border-radius:.9rem!important;color:#fcd34d!important}',
+  'html.is-native-app #rp-bell-badge{border-color:#064e3b}',
   'html.is-native-app header #mobile-search-input{background:rgba(255,255,255,.96)!important;color:#0f172a!important;border:0!important;border-radius:16px!important;height:46px;font-size:.95rem;box-shadow:0 4px 14px rgba(0,0,0,.18)}',
   'html.is-native-app header #mobile-search-input::placeholder{color:#64748b}',
   'html.is-native-app header>div:nth-child(2) i{top:15px!important;color:#64748b!important}',
   'html.is-native-app:not([data-view="home"]) header>div:nth-child(2){display:none!important}',
   'html.is-native-app[data-view="reader"] header.sticky{display:none!important}',
-  'html.is-native-app #announcement-bar{padding:.35rem .9rem!important;font-size:.7rem!important;line-height:1.5;border:0!important}',
+  'html.is-native-app #announcement-bar{display:none!important}',
   'html.is-native-app[data-view="reader"] #announcement-bar{display:none!important}',
 
   /* ---- البانر الرئيسي ---- */
@@ -323,6 +529,12 @@
   '.pg-h{font-size:1.35rem;font-weight:900;margin:2px 4px 2px;display:flex;align-items:center;gap:.5rem}',
   '.pg-h i{color:var(--brand-accent)}',
   '.pg-sub{font-size:.78rem;opacity:.65;margin:0 4px 16px}',
+  '.lib-tabs{display:flex;gap:6px;overflow-x:auto;padding:2px 2px 12px;margin:0 -2px;scrollbar-width:none}',
+  '.lib-tabs::-webkit-scrollbar{display:none}',
+  '.lib-tab{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:8px 11px;border-radius:999px;border:1px solid rgba(100,116,139,.25);background:rgba(100,116,139,.08);color:inherit;font:inherit;font-size:.76rem;font-weight:800;white-space:nowrap}',
+  '.lib-tab.on{background:linear-gradient(135deg,var(--brand-primary),var(--brand-primary-dark));border-color:transparent;color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.18)}',
+  '.lib-tab em{font-style:normal;font-size:.68rem;min-width:18px;height:18px;line-height:18px;border-radius:9px;background:rgba(255,255,255,.28);text-align:center;padding:0 5px}',
+  '.lib-tab:not(.on) em{background:rgba(100,116,139,.2)}',
   '.pg-h3{font-size:.9rem;font-weight:800;margin:20px 4px 10px;opacity:.75;display:flex;align-items:center;gap:.4rem}',
   '.lib-card{display:flex;gap:12px;align-items:center;background:#fff;border-radius:20px;padding:12px;margin-bottom:12px;box-shadow:0 2px 16px rgba(15,23,42,.08);position:relative;transition:transform .15s}',
   '.lib-card:active{transform:scale(.98)}',
@@ -390,7 +602,7 @@
     { id: 'library', icon: 'fa-book-open', label: 'الروايات' },
     { id: 'search', icon: 'fa-magnifying-glass', label: 'بحث' },
     { id: 'mylib', icon: 'fa-bookmark', label: 'المكتبة' },
-    { id: 'theme', icon: 'fa-moon', label: 'المظهر' }
+    { id: 'account', icon: 'fa-user', label: 'حسابي' }
   ];
   var bar = document.createElement('nav');
   bar.id = 'app-tabbar';
@@ -409,6 +621,7 @@
   function syncThemeIcon() {
     var ic = bar.querySelector('[data-tab="theme"] i');
     if (ic) ic.className = 'fa-solid ' + (root.classList.contains('dark') ? 'fa-sun' : 'fa-moon');
+    if (libOpen()) paintLib();
   }
   function toHome() { if (currentView() !== 'home' && typeof window.navigateTo === 'function') window.navigateTo('home'); }
   function scrollToEl(sel, delay) {
@@ -441,6 +654,15 @@
       '<div class="lib-info"><div class="lib-title">' + esc(n.title) + '</div><div class="lib-meta">' + esc(n.author || '') + (n.genre ? ' · ' + esc(n.genre) : '') + ' · ' + n.chapters.length + ' فصول</div></div>' +
       '<button class="lib-heart" data-fav="' + esc(n.id) + '" aria-label="إزالة من المفضلة"><i class="fa-solid fa-heart"></i></button></div>';
   }
+  var libTab = null;
+  function fmtB(b) { b = +b || 0; return b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB'; }
+  function dlCard(r) {
+    var n = novelById(r.id);
+    return '<div class="lib-card" data-act="open" data-id="' + esc(r.id) + '">' + (n ? coverEl(n) : '<div class="lib-cover"><i class="fa-solid fa-book"></i></div>') +
+      '<div class="lib-info"><div class="lib-title">' + esc(r.title || (n && n.title) || '') + '</div><div class="lib-meta">' + (r.n ? r.n + ' فصول · ' : '') + fmtB(r.bytes) + (r.partial ? ' · بدون الفصول المقفولة' : '') + '</div>' +
+      '<div class="lib-meta" style="color:#059669;font-weight:800"><i class="fa-solid fa-circle-check"></i> متاحة بدون إنترنت</div></div>' +
+      '<button class="lib-heart" data-rmdl="' + esc(r.id) + '" aria-label="حذف التحميل" style="background:rgba(100,116,139,.12);color:#64748b"><i class="fa-solid fa-trash-can"></i></button></div>';
+  }
   function paintLib() {
     var d = readerData();
     var items = Object.keys(d.last).map(function (id) { return { n: novelById(id), l: d.last[id] }; })
@@ -449,14 +671,14 @@
     items.forEach(function (x) { x.done = (x.l.ch || 0) >= x.n.chapters.length - 1 && (x.l.pct || 0) >= 93; });
     var cont = items.filter(function (x) { return !x.done; }), done = items.filter(function (x) { return x.done; });
     var favs = d.favs.map(novelById).filter(Boolean);
-    var h = '<h2 class="pg-h"><i class="fa-solid fa-bookmark"></i>مكتبتي</h2><p class="pg-sub">تابع قراءتك وروائعك المفضلة في مكان واحد</p>';
-    if (!cont.length && !favs.length && !done.length) {
-      h += '<div class="lib-empty"><i class="fa-solid fa-book-open-reader"></i><b>مكتبتك فارغة</b><span>الروايات التي تبدأ قراءتها وتلك التي تضيفها للمفضلة<br>ستظهر هنا لتصل إليها بسرعة</span></div>';
-    } else {
-      if (cont.length) h += '<h3 class="pg-h3"><i class="fa-solid fa-book-open-reader"></i>أكمل القراءة</h3>' + cont.map(function (x) { return progCard(x.n, x.l, false); }).join('');
-      if (favs.length) h += '<h3 class="pg-h3"><i class="fa-solid fa-heart" style="color:#e11d48"></i>المفضلة</h3>' + favs.map(favCard).join('');
-      if (done.length) h += '<h3 class="pg-h3"><i class="fa-solid fa-circle-check"></i>أنهيتها</h3>' + done.map(function (x) { return progCard(x.n, x.l, true); }).join('');
-    }
+    var dls = window.rpOffline ? window.rpOffline.list() : [];
+    var T = [['dl', 'fa-arrow-down', 'المحمّلة', dls.length], ['cont', 'fa-book-open-reader', 'أكمل القراءة', cont.length], ['fav', 'fa-heart', 'المفضلة', favs.length], ['done', 'fa-circle-check', 'أنهيتها', done.length]];
+    if (!libTab || !T.some(function (t) { return t[0] === libTab; })) libTab = (T.filter(function (t) { return t[3]; })[0] || T[1])[0];
+    var h = '<h2 class="pg-h"><i class="fa-solid fa-bookmark"></i>مكتبتي</h2><p class="pg-sub">رواياتك المحمّلة، ومتابعة قراءتك، ومفضلتك في مكان واحد</p>' +
+      '<div class="lib-tabs">' + T.map(function (t) { return '<button type="button" class="lib-tab' + (libTab === t[0] ? ' on' : '') + '" data-tab="' + t[0] + '"><i class="fa-solid ' + t[1] + '"></i><span>' + t[2] + '</span>' + (t[3] ? '<em>' + t[3] + '</em>' : '') + '</button>'; }).join('') + '</div>';
+    var EMPTY = { dl: ['fa-arrow-down', 'مفيش روايات محمّلة', 'افتح أي رواية واضغط الزر الدائري الأخضر لتحميلها وقراءتها بدون إنترنت'], cont: ['fa-book-open-reader', 'مفيش روايات قيد القراءة', 'الروايات التي تبدأ قراءتها ستظهر هنا لتكمل من حيث توقفت'], fav: ['fa-heart', 'مفيش مفضلة لسه', 'اضغط على القلب في أي رواية لتظهر هنا'], done: ['fa-circle-check', 'لسه ما أنهيتش رواية', 'الروايات التي تنهيها ستظهر هنا'] };
+    var body = libTab === 'dl' ? dls.map(dlCard).join('') : libTab === 'cont' ? cont.map(function (x) { return progCard(x.n, x.l, false); }).join('') : libTab === 'fav' ? favs.map(favCard).join('') : done.map(function (x) { return progCard(x.n, x.l, true); }).join('');
+    h += body || '<div class="lib-empty"><i class="fa-solid ' + EMPTY[libTab][0] + '"></i><b>' + EMPTY[libTab][1] + '</b><span>' + EMPTY[libTab][2] + '</span></div>';
     lib.innerHTML = h;
     paintBg(lib);
   }
@@ -465,9 +687,14 @@
     if (!bg || bg === 'transparent' || /rgba\(.*,\s*0\)$/.test(bg)) bg = root.classList.contains('dark') ? '#020617' : '#fcf8f2';
     el.style.background = bg;
   }
-  function openLib() { closeSearch(true); paintLib(); root.classList.add('lib-open'); lib.scrollTop = 0; }
+  function openLib() { closeSearch(true); libTab = null; paintLib(); root.classList.add('lib-open'); lib.scrollTop = 0; }
   function closeLib() { root.classList.remove('lib-open'); }
+  document.addEventListener('rp-offline-changed', function () { if (libOpen()) paintLib(); });
   lib.addEventListener('click', function (e) {
+    var tb = e.target.closest('[data-tab]');
+    if (tb) { libTab = tb.dataset.tab; paintLib(); lib.scrollTop = 0; return; }
+    var rm = e.target.closest('[data-rmdl]');
+    if (rm) { if (window.rpOffline && confirm('تمسح النسخة المحمّلة من الموبايل؟')) window.rpOffline.remove(rm.dataset.rmdl); return; }
     var hb = e.target.closest('[data-fav]');
     if (hb) { if (typeof window.nxToggleFav === 'function') window.nxToggleFav(hb.dataset.fav); paintLib(); return; }
     var c = e.target.closest('.lib-card');
@@ -580,6 +807,7 @@
     if (e.target && (e.target.id === 'mobile-search-input' || e.target.id === 'search-input')) { e.target.blur(); setActive('search'); openSearch(); }
   });
 
+  window.__appAfterOverlay = function () { if (activeTab === 'account' || activeTab === 'library') setActive(currentView() === 'novel-details' ? 'library' : 'home'); };
   window.__appBack = function () {
     if (searchOpen()) { closeSearch(); return true; }
     if (libOpen()) { closeLib(); setActive('home'); return true; }
@@ -592,9 +820,9 @@
     if (!b) return;
     try { if (navigator.vibrate) navigator.vibrate(8); } catch (x) {}
     var id = b.dataset.tab;
-    if (id === 'theme') {
-      if (typeof window.toggleDarkMode === 'function') window.toggleDarkMode();
-      setTimeout(function () { syncThemeIcon(); if (libOpen()) paintLib(); }, 60);
+    if (id === 'account') {
+      closeLib(); closeSearch(true); setActive('account');
+      if (typeof window.rpOpenAccount === 'function') window.rpOpenAccount();
       return;
     }
     if (id === 'search') { setActive('search'); openSearch(); return; }
@@ -605,7 +833,7 @@
     toHome();
     var d = wasHome ? 0 : 350;
     if (id === 'home') setTimeout(function () { window.scrollTo({ top: 0, behavior: 'smooth' }); }, d + 30);
-    else if (id === 'library') scrollToEl('#library-section-title', d + 60);
+    else if (id === 'library') { if (typeof window.rpOpenAll === 'function') window.rpOpenAll(); else scrollToEl('#library-section-title', d + 60); }
   });
 
   /* ================= متابعة الصفحة الحالية ================= */

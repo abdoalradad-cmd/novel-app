@@ -138,6 +138,7 @@ async function ensureSchema(env) {
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_contest_ans ON contest_answers(week, user_id)',
     'CREATE TABLE IF NOT EXISTS pts_votes (voter INTEGER NOT NULL, nid TEXT NOT NULL, ch INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (voter, nid, ch))',
     "CREATE TABLE IF NOT EXISTS wal_log (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, day TEXT NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, amt REAL NOT NULL DEFAULT 0, ts INTEGER NOT NULL DEFAULT 0, UNIQUE(uid,kind,ref))",
+    "CREATE TABLE IF NOT EXISTS withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, points REAL NOT NULL, egp REAL NOT NULL, rate REAL NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', ts INTEGER NOT NULL, decided INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS streaks (uid INTEGER PRIMARY KEY, last TEXT NOT NULL DEFAULT '', cur INTEGER NOT NULL DEFAULT 0, awards INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS ch_alerts (uid INTEGER NOT NULL, nid TEXT NOT NULL, ch INTEGER NOT NULL, rel INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', sent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (uid, nid, ch))",
     'CREATE INDEX IF NOT EXISTS ch_alerts_due ON ch_alerts (sent, rel)',
@@ -829,6 +830,8 @@ async function fansOf(env, author) {
   const nm = {}; us.forEach((u) => { nm[u.id] = u.name; });
   return top.map((x, i) => ({ uid: x.uid, name: nm[x.uid] || '', score: x.score, rank: i + 1, ...fanTier(x.score, i + 1) })).filter((x) => x.tier && x.name);
 }
+async function goldConf(env) { const c = await getSetting(env, 'gold'); const n = (v, d, a, z) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(z, v)) : d; }; return { rate: n(c.rate, 10, 0.01, 100000), min: n(c.min, 50, 0, 1000000) }; }
+const egpOf = (pts, rate) => Math.floor((pts / rate) * 100 + 1e-9) / 100;
 async function streakConf(env) { const c = await getSetting(env, 'streak'); const n = (v, d, a, z) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(z, v)) : d; }; return { on: c.on !== false, days: Math.round(n(c.days, 7, 2, 60)), pts: 2 }; }
 async function streakCheckin(env, uid) {
   const sc = await streakConf(env), today = cairoDay(), yest = new Date(Date.parse(today + 'T00:00:00Z') - DAYMS).toISOString().slice(0, 10);
@@ -1400,6 +1403,23 @@ async function route(request, env) {
     await notifyAdmins(env, user.name, '🛒 طلب شراء رواية', user.name + ' عايز يشتري «' + title + '» بـ ' + price + ' جنيه عن طريق ' + (method === 'instapay' ? 'انستا باي' : 'المحفظة'));
     return json({ ok: true, id: r.meta && r.meta.last_row_id });
   }
+  if (path === '/api/me/wallet' && m === 'GET') {
+    const r0 = await env.DB.prepare('SELECT wallet,payout FROM users WHERE id=?').bind(user.id).first() || {}, g = await goldConf(env), pts = r0.wallet || 0, egp = egpOf(pts, g.rate);
+    const { results } = await env.DB.prepare('SELECT id,points,egp,kind,value,status,ts,decided FROM withdrawals WHERE uid=? ORDER BY id DESC LIMIT 20').bind(user.id).all();
+    return json({ points: pts, egp, rate: g.rate, min: g.min, can: egp >= g.min && egp > 0, pending: results.some((x) => x.status === 'pending'), payout: payoutOf(r0.payout), history: results }, 200, { 'Cache-Control': 'private, no-store' });
+  }
+  if (path === '/api/me/withdraw' && m === 'POST') {
+    const b = await body(request, 1000), kind = b.kind === 'instapay' ? 'instapay' : 'wallet', value = str(b.value, 60).trim().replace(/[<>"']/g, ''), name = str(b.name, 60).trim().replace(/[<>"']/g, '');
+    if (!value) return fail('اكتب رقم المحفظة أو رابط/حساب انستا باي');
+    const g = await goldConf(env), r0 = await env.DB.prepare('SELECT wallet FROM users WHERE id=?').bind(user.id).first() || {}, pts = r0.wallet || 0, egp = egpOf(pts, g.rate);
+    if (!(egp > 0) || egp < g.min) return fail('معذرةً، لم تصل إلى حد السحب بعد');
+    const up = await env.DB.prepare('UPDATE users SET wallet=0 WHERE id=? AND wallet=?').bind(user.id, pts).run();
+    if (!(up && up.meta && up.meta.changes)) return fail('حصل تغيير في رصيدك، جرّب تاني');
+    const ins = await env.DB.prepare('INSERT INTO withdrawals (uid,points,egp,rate,kind,value,name,status,ts) VALUES (?,?,?,?,?,?,?,?,?)').bind(user.id, pts, egp, g.rate, kind, value, name, 'pending', Date.now()).run();
+    await env.DB.prepare('UPDATE users SET payout=? WHERE id=?').bind(JSON.stringify({ kind, value, name }), user.id).run();
+    await notifyAdmins(env, user.name, '💸 طلب سحب جديد', user.name + ' طلب سحب ' + egp + ' جنيه (' + pts + ' نقطة ذهبية)', 'wd');
+    return json({ ok: true, id: ins.meta.last_row_id, points: pts, egp });
+  }
   if (path === '/api/me/payout' && m === 'GET') { const r = await env.DB.prepare('SELECT payout FROM users WHERE id=?').bind(user.id).first(); return json({ payout: payoutOf(r && r.payout) }, 200, { 'Cache-Control': 'private, no-store' }); }
   if (path === '/api/me/payout' && m === 'PUT') {
     const b = await body(request, 1000), kind = b.kind === 'instapay' ? 'instapay' : 'wallet', value = str(b.value, 60).trim().replace(/[<>"']/g, ''), name = str(b.name, 60).trim().replace(/[<>"']/g, '');
@@ -1755,6 +1775,22 @@ async function route(request, env) {
       const { results: draws } = await env.DB.prepare('SELECT week,user_id,name,points,prize,ts FROM pts_draws ORDER BY week DESC LIMIT 12').all();
       return json({ prize: pts.prize || 0, start: pts.start || '', week: weekStart(), nextDraw: weekEndMs(weekStart()), top, draws });
     }
+    if (path === '/api/admin/gold' && m === 'GET') return json(await goldConf(env));
+    if (path === '/api/admin/gold' && m === 'PUT') { const b = await body(request, 300), cur = await goldConf(env); await setSetting(env, 'gold', { rate: b.rate == null ? cur.rate : b.rate, min: b.min == null ? cur.min : b.min }); return json(await goldConf(env)); }
+    if (path === '/api/admin/withdrawals' && m === 'GET') {
+      const { results } = await env.DB.prepare('SELECT w.*,u.name AS uname,u.email AS uemail FROM withdrawals w JOIN users u ON u.id=w.uid ORDER BY (w.status=\'pending\') DESC, w.id DESC LIMIT 100').all();
+      return json({ items: results.map((w) => ({ id: w.id, uid: w.uid, user: w.uname, email: w.uemail, points: w.points, egp: w.egp, rate: w.rate, kind: w.kind, value: w.value, name: w.name, status: w.status, ts: w.ts, decided: w.decided })) });
+    }
+    { const mw = /^\/api\/admin\/withdrawals\/(\d+)\/(approve|reject)$/.exec(path);
+      if (mw && m === 'POST') {
+        const w = await env.DB.prepare('SELECT * FROM withdrawals WHERE id=?').bind(+mw[1]).first(); if (!w) return fail('الطلب مش موجود', 404);
+        const st = mw[2] === 'approve' ? 'approved' : 'rejected';
+        const up = await env.DB.prepare("UPDATE withdrawals SET status=?,decided=? WHERE id=? AND status='pending'").bind(st, Date.now(), w.id).run();
+        if (!(up && up.meta && up.meta.changes)) return fail('الطلب اتحسم قبل كده');
+        if (st === 'approved') await notifyUser(env, w.uid, '✅ تم تأكيد طلب السحب', 'تم تأكيد عملية السحب (' + w.egp + ' جنيه) وسيصلك السحب قريبًا.', 'wd');
+        else await notifyUser(env, w.uid, '❌ تم رفض طلب السحب', 'تم رفض طلب السحب (' + w.egp + ' جنيه). لو فيه استفسار تواصل معنا.', 'wd');
+        return json({ ok: true, status: st });
+      } }
     if (path === '/api/admin/streak' && m === 'GET') return json(await streakConf(env));
     if (path === '/api/admin/streak' && m === 'PUT') { const b = await body(request, 300), cur = await streakConf(env); await setSetting(env, 'streak', { on: b.on == null ? cur.on : !!b.on, days: b.days == null ? cur.days : b.days, pts: b.pts == null ? cur.pts : b.pts }); return json(await streakConf(env)); }
     if (path === '/api/admin/points' && m === 'PUT') { const b = await body(request, 300), pts = await getSetting(env, 'pts'); await setSetting(env, 'pts', { ...pts, prize: Math.max(0, Math.min(1e7, Number(b.prize) || 0)) }); return json({ ok: true }); }
