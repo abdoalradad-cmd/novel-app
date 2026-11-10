@@ -576,7 +576,7 @@ async function geminiPart(env, text, conf, ctx) { // جزء واحد: أدوار
     for (let k = 0; k < 3; k++) {
       await one0(i);
       const secs = Math.max(0, wavs[i].length - 44) / 48000;
-      if (need < 40 || secs >= need / 22) return;
+      if (need < 40 || secs >= need / 18) return;
     }
     const e = new Error('short_audio'); e.code = 502; e.detail = 'الصوت اللي رجع من جوجل ناقص (قصير عن النص) — هيتعاد'; throw e;
   };
@@ -1644,20 +1644,22 @@ async function route(request, env) {
     // فحص الفصول المحوّلة وهي أقصر من N ثانية (غالبًا اتحوّل العنوان بس) وحذفها من الطابور علشان الموقع يبعتها تاني بنصها الكامل
     if (path === '/api/admin/tts/fix-short' && m === 'POST') {
       const b = await body(request, 500), max = Math.max(1, Math.min(60, +b.max || 5));
-      const { results } = await env.DB.prepare("SELECT id,nid,idx,ntitle,ctitle,secs,nparts FROM tts_ch WHERE status='done' AND secs<?").bind(max).all();
+      const ratio = Math.max(0.2, Math.min(0.95, +b.ratio || 0.6)); // الصوت أقصر من 60% من المدة المتوقعة للنص = ناقص (بيفوّت فقرات/جمل)
+      const { results } = await env.DB.prepare("SELECT id,nid,idx,ntitle,ctitle,secs,nparts,LENGTH(text) AS len FROM tts_ch WHERE status='done' AND (secs<? OR secs < LENGTH(text)*1.0/" + CPS + "*?)").bind(max, ratio).all();
       if (!b.dry) {
         for (const r of results) {
           if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < r.nparts; i++) ks.push('c/' + r.id + '/' + i + '.wav'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); }
           await env.DB.prepare('DELETE FROM tts_ch WHERE id=?').bind(r.id).run();
         }
       }
-      return json({ ok: true, dry: !!b.dry, n: results.length, items: results.slice(0, 200).map((r) => ({ nid: r.nid, idx: r.idx, novel: r.ntitle, chapter: r.ctitle, secs: Math.round(r.secs * 10) / 10 })) });
+      return json({ ok: true, dry: !!b.dry, n: results.length, items: results.slice(0, 200).map((r) => ({ nid: r.nid, idx: r.idx, novel: r.ntitle, chapter: r.ctitle, secs: Math.round(r.secs * 10) / 10, expect: Math.round(r.len / CPS) })) });
     }
     if (path === '/api/admin/tts/known' && m === 'GET') {
       const { results } = await env.DB.prepare('SELECT nid,idx,sig FROM tts_ch').all(), sigs = {};
       const { results: mkr } = await env.DB.prepare("SELECT nid,idx FROM tts_ch WHERE status='done' OR text LIKE '%«%' OR text LIKE '%' || char(34) || '%' OR text LIKE '%“%' OR text LIKE '-%' OR text LIKE '%' || char(10) || '-%' OR text LIKE '%' || char(10) || '–%' OR text LIKE '%' || char(10) || '—%'").all(), mk = {};
       mkr.forEach((r) => (mk[r.nid + '#' + r.idx] = 1));
-      results.forEach((r) => (sigs[r.nid + '#' + r.idx] = r.sig)); return json({ sigs, mk });
+      const { results: ln } = await env.DB.prepare('SELECT nid,idx,LENGTH(text) AS n FROM tts_ch').all(), lens = {}; ln.forEach((r) => (lens[r.nid + '#' + r.idx] = r.n));
+      results.forEach((r) => (sigs[r.nid + '#' + r.idx] = r.sig)); return json({ sigs, mk, lens });
     }
     if (path === '/api/admin/tts/enqueue' && m === 'POST') {
       if (!(await ttsMigrate(env))) return fail('بنمسح الصوت القديم… جرّب بعد دقيقة', 503);
@@ -1672,7 +1674,7 @@ async function route(request, env) {
         const ex = await env.DB.prepare('SELECT id,sig,prov,text,nparts,status FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
         const sib = await env.DB.prepare('SELECT prov,MIN(ord) AS o FROM tts_ch WHERE nid=?').bind(nid).first(), prov = conf.novelProv[nid] || (sib && sib.prov) || conf.defProv;
         if (!ex) { if (sib && sib.o != null) ord = sib.o; await env.DB.prepare('INSERT INTO tts_ch (nid,idx,ntitle,ctitle,ord,sig,text,parts,nparts,created,updated,prov) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind(nid, ix, ntitle, ctitle, ord, sig, text, JSON.stringify(parts), parts.length, now, now, prov).run(); added++; }
-        else if (ex.status === 'done' || (ex.sig === sig && !(hasMk(text) && !hasMk(ex.text)))) { await env.DB.prepare('UPDATE tts_ch SET ntitle=?,ctitle=? WHERE id=?').bind(ntitle, ctitle, ex.id).run(); skipped++; }
+        else if (!it.redo && (ex.status === 'done' || (ex.sig === sig && !(hasMk(text) && !hasMk(ex.text))))) { await env.DB.prepare('UPDATE tts_ch SET ntitle=?,ctitle=? WHERE id=?').bind(ntitle, ctitle, ex.id).run(); skipped++; }
         else {
           if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < ex.nparts; i++) ks.push('c/' + ex.id + '/' + i + '.wav'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); } await env.DB.prepare("UPDATE tts_ch SET ntitle=?,ctitle=?,sig=?,text=?,parts=?,nparts=?,done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=?,prov=? WHERE id=?").bind(ntitle, ctitle, sig, text, JSON.stringify(parts), parts.length, now, prov, ex.id).run(); updated++; }
       }
