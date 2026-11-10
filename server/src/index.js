@@ -1641,6 +1641,18 @@ async function route(request, env) {
       const conf = await getTtsConf(env);
       return json({ idx: c.idx, status: c.status, prov: c.prov, multiOn: conf.multi, chars: text.length, dashLines, quotes, roles, parts: parts.length, multiParts: multi, sample });
     }
+    // فحص الفصول المحوّلة وهي أقصر من N ثانية (غالبًا اتحوّل العنوان بس) وحذفها من الطابور علشان الموقع يبعتها تاني بنصها الكامل
+    if (path === '/api/admin/tts/fix-short' && m === 'POST') {
+      const b = await body(request, 500), max = Math.max(1, Math.min(60, +b.max || 5));
+      const { results } = await env.DB.prepare("SELECT id,nid,idx,ntitle,ctitle,secs,nparts FROM tts_ch WHERE status='done' AND secs<?").bind(max).all();
+      if (!b.dry) {
+        for (const r of results) {
+          if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < r.nparts; i++) ks.push('c/' + r.id + '/' + i + '.wav'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); }
+          await env.DB.prepare('DELETE FROM tts_ch WHERE id=?').bind(r.id).run();
+        }
+      }
+      return json({ ok: true, dry: !!b.dry, n: results.length, items: results.slice(0, 200).map((r) => ({ nid: r.nid, idx: r.idx, novel: r.ntitle, chapter: r.ctitle, secs: Math.round(r.secs * 10) / 10 })) });
+    }
     if (path === '/api/admin/tts/known' && m === 'GET') {
       const { results } = await env.DB.prepare('SELECT nid,idx,sig FROM tts_ch').all(), sigs = {};
       const { results: mkr } = await env.DB.prepare("SELECT nid,idx FROM tts_ch WHERE status='done' OR text LIKE '%«%' OR text LIKE '%' || char(34) || '%' OR text LIKE '%“%' OR text LIKE '-%' OR text LIKE '%' || char(10) || '-%' OR text LIKE '%' || char(10) || '–%' OR text LIKE '%' || char(10) || '—%'").all(), mk = {};
@@ -1654,6 +1666,7 @@ async function route(request, env) {
       for (const it of b.items) {
         const nid = str(it.nid, 80), ix = parseInt(it.idx, 10), text = String(it.text || '').slice(0, 150000).trim(), sig = str(it.sig, 40);
         if (!nid || !(ix >= 0 && ix < 5000)) { skipped++; continue; }
+        if (!text.includes('\n') && text.length < 120) { skipped++; continue; } // عنوان بس من غير نص الفصل: ما نحوّلوش
         const parts = splitParts(text, conf.econ ? ECON_MX : 700); if (!parts.length) { skipped++; continue; }
         const ntitle = str(it.ntitle, 120), ctitle = str(it.ctitle, 120); let ord = Math.max(-1e9, Math.min(1e9, parseInt(it.ord, 10) || 0));
         const ex = await env.DB.prepare('SELECT id,sig,prov,text,nparts,status FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
