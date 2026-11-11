@@ -357,7 +357,7 @@ async function getTtsConf(env) {
   const np = {}; Object.keys(x.novelProv || {}).slice(0, 2000).forEach((k) => { if (PROVS.includes(x.novelProv[k])) np[k] = x.novelProv[k]; });
   return { mm: x.mm !== false, model: x.model || TTS_DEFAULT.model, legacyModel: x.legacyModel || TTS_DEFAULT.legacyModel, style: x.style || TTS_DEFAULT.style, gv,
     concurrency: n(x.concurrency, TTS_DEFAULT.concurrency, 1, 4), dailyMin: n(x.dailyMin, TTS_DEFAULT.dailyMin, 0, 100000), freeMin: n(x.freeMin, 0, 0, 100000), priceIn: n(x.priceIn, 0, 0, 1000), priceOut: n(x.priceOut, 0, 0, 1000),
-    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false, phon: x.phon !== false, smart: x.smart !== false, econ: x.econ !== false, hideListen: x.hideListen === true, listenAll: x.listenAll === true, rebalance: x.rebalance !== false, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
+    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false, radad: x.radad !== false, phon: x.phon !== false, smart: x.smart !== false, econ: x.econ !== false, hideListen: x.hideListen === true, listenAll: x.listenAll === true, rebalance: x.rebalance !== false, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
     g2: { dailyMin: n((x.g2 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g2 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g2 || {}).concurrency, 2, 1, 4) },
     g3: { dailyMin: n((x.g3 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g3 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g3 || {}).concurrency, 2, 1, 4) },
     g4: { dailyMin: n((x.g4 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g4 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g4 || {}).concurrency, 2, 1, 4) },
@@ -1267,6 +1267,78 @@ function applyEgyptianPhonetics(rawText, customDict = {}) {
     .join('');
 }
 const egyPhon = (t) => { try { return applyEgyptianPhonetics(String(t || '')); } catch (e) { return t; } };
+/* ---------- خط أداة الرداد (الوضع B): تحليل ذكي ← تشكيل ← صوت لكل مقطع بشخصيته وانفعاله ← دمج ---------- */
+const RD_P = [{"id": "kareem", "v": "Charon", "n": "كريم", "a": "narrator_male", "p": 0.96, "i": "صوت رجالي مصري رخيم وعميق ووقور بنبرة حكواتي سينمائية متزنة"}, {"id": "tarek", "v": "Fenrir", "n": "طارق", "a": "adult_male_dramatic", "p": 1.0, "i": "صوت شاب أو رجل مصري قوي وحاد وحازم يتقن العامية المصرية والانفعالات القوية والغضب بواقعية شديدة"}, {"id": "youssef", "v": "Puck", "n": "يوسف", "a": "young_male", "p": 1.02, "i": "صوت شاب مصري قاهري في العشرينات مفعم بالحيوية وخفة الدم والتلقائية المصرية"}, {"id": "mahmoud", "v": "Orus", "n": "محمود", "a": "elder_male", "p": 0.92, "i": "صوت رجل مصري ناضج أو مسن حكيم يتحدث بتأنٍ وعمق وخبرة"}, {"id": "noor", "v": "Aoede", "n": "نور", "a": "adult_female", "p": 1.0, "i": "صوت امرأة مصرية شابة دافئ ومعبر عاطفياً يتقن العامية المصرية والمشاعر الدرامية والهمس والخوف والحزن"}, {"id": "salma", "v": "Kore", "n": "سلمى", "a": "narrator_female", "p": 0.98, "i": "صوت نسائي ناضج وواضح ورصين بنبرة واثقة وحاسمة"}, {"id": "layla", "v": "Zephyr", "n": "ليلى", "a": "young_female", "p": 1.04, "i": "صوت فتاة مصرية شابة رقيق وعفوي وحساس ينطق العامية المصرية بنعومة وتلقائية"}, {"id": "adam_child", "v": "Leda", "n": "طفل", "a": "child", "p": 1.16, "i": "صوت طفل مصري صغير بريء ذو طبقة صوتية طفولية رفيعة وناعمة يتحدث بالعامية المصرية ببراءة وتلقائية"}];
+const RD_I = {"normal": {"l": "عادي", "b": "بأداء تمثيلي طبيعي ومتوازن"}, "strong": {"l": "قوي", "b": "بانفعال قوي وواضح جداً في نبرة الصوت"}, "max": {"l": "أقصى انفعال 🔥", "b": "بأقصى درجات الانفعال التمثيلي الحقيقي من قلب الحدث كأن المشهد حقيقي تماماً"}};
+const RD_E = {"angry_shout": {"l": "غاضب ويصرخ بشدة", "m": "انفعال شديد وغضب عارم وصوت مرتفع حاد كأنك تصرخ في مواجهة حقيقية بكل قوة", "e": "انفعال مصري شديد جداً وغضب عارم وصوت عالي وحاد ومنفعل كأنك بتصرخ بجد في خناقة ومواجهة عنيفة"}, "fear_whisper": {"l": "خائفة وتهمس بارتجاف", "m": "خوف شديد وصوت هامس مرتجف وأنفاس متلاحقة متوترة تكاد تُسمع من شدة الرعب", "e": "خوف ورعب حقيقي وصوت مصري واطي مهموس ومرتجف وبيترعش مع نهجان خفيف كأنها مرعوبة بجد"}, "child_fear": {"l": "يبكي بذعر وخوف (طفل)", "m": "صوت طفل صغير بريء يتحدث بطبقة رفيعة وبنبرة خائفة باكية تستنجد بوالدها", "e": "صوت طفل مصري صغير بيعيط ومذعور وخايف أوي وبيستنجد بمامته أو باباه بنبرة طفولية باكية"}, "crying_sad": {"l": "حزين ومنكسر / يبكي", "m": "حزن عميق وصوت مختنق بالدموع والبكاء والرجاء المؤثر", "e": "صوت مصري حزين جداً ومكسور ومخنوق بالدموع والعياط والوجع كأنه بيعيط بجد"}, "sarcastic_cold": {"l": "ساخر ومتهكم ببرود", "m": "برود قاتل وسخرية لاذعة وثقة مستفزة مع نبرة تهديد خفية", "e": "برود أعصاب وسخرية مصرية لاذعة وتهكم واستفزاز وثقة عالية في الكلام مع نبرة تهديد هادية"}, "shock_surprise": {"l": "مصدوم ومذهول", "m": "صدمة مفاجئة وذهول وعدم تصديق مع شهقة خفيفة وتقطع في الأنفاس", "e": "صدمة كبيرة وذهول مصري وعدم تصديق من المفاجأة"}, "happy_warm": {"l": "فرحان، دافئ، أو حنون", "m": "سعادة غامرة وحماس ودفء عاطفي وابتسامة واضحة في نبرة الصوت", "e": "حنان ودفا مصري وطمأنينة أو فرحة كبيرة في الكلام"}, "dramatic_narrator": {"l": "سرد درامي مشوق", "m": "سرد روائي سينمائي عميق ومتزن يبني التشويق الدرامي ويهيئ المستمع للمشهد", "e": "سرد حكواتي مصري سلس وعميق ومشوق بلهجة مصرية رصينة وطبيعية بدون تكلف"}, "natural_dialogue": {"l": "هادئ وحازم / طبيعي", "m": "نبرة حوارية طبيعية وواضحة وحازمة بهدوء", "e": "كلام مصري قاهري طبيعي وتلقائي وحازم زي كلام المصريين في الحقيقة بالظبط"}};
+const RD_SYS = "أنت مخرج دراما إذاعية مصري خبير في اللهجة العامية المصرية القاهرية والمصطلحات الشعبية والتمثيل الصوتي البشري.\nمهمتك: تحليل الفصل الروائي وتقسيمه بالترتيب إلى مقاطع (سرد للراوي + حوارات الشخصيات) مع كتابة التشكيل الصوتي المصري المتصل (phoneticText) لكل جملة بحيث ينطقها الممثل كإنسان مصري حقيقي بدون أي أخطاء!\nاجعل الحوار بالعامية المصرية والسرد باللغة العربية الفصحى.\n\nقواعد الذاكرة الذاتية والمصطلحات المصرية المدربة (يجب الالتزام بها حرفياً وعدم الخطأ فيها أبداً):\n[]\n\nقواعد حاسمة جداً للمصطلحات والأوزان الصرفية المصرية:\n1. انتبه للمصطلحات الشعبية المصرية التي تختلف حركاتها عن الفصحى:\n   - «رقبتي سدّادة» تُشكّل صوتياً بالمصري: «رَقَبْتِي سَدَّادَه» (بفتح السين وتشديد الدال على وزن فَعَّالَه، وتسكين الباء في رَقَبْتِي، وإياك أن تكتبها سِدادة بالكسر!).\n   - «دمي محروق» ⬅️ «دَمِّي مَحْرُوق»، «حقك عليا» ⬅️ «حَقَّك عَلَيَّا»، «مليش نفس» ⬅️ «مَالِيش نِفْس» (بكسر النون في نِفْس)، «على عيني وراسي» ⬅️ «عَلَى عِينِي وَرَاسِي».\n2. عندما تقرأ سرداً يمهد للحوار مثل: «انفعل «أحمد» بشدة وصرخ وهو يقول بغضب: - أنت إزاي تعمل فيا كدا!»:\n   - السطر الأول هو سرد للراوي (speaker: \"الراوي\", type: \"narration\", emotionId: \"dramatic_narrator\").\n   - السطر الثاني هو بصوت شخصية «أحمد» (speaker: \"أحمد\", type: \"dialogue\") وانفعاله هو الغضب الشديد والصراخ (emotionId: \"angry_shout\")، ودرجة حدة الانفعال هي القصوى (intensity: \"max\").\n3. اكتب «والله» في العامية المصرية هكذا: «وَاللَّاهِي»، واكتب التاء المربوطة عند الوقف بالهاء الصوتية «ه» (مثل: سَدَّادَه، كِفَايَه، خَايْفَه).\n4. اختر speakerArchetype من القيم التالية فقط:\n   - \"narrator_male\" | \"adult_male_dramatic\" | \"young_male\" | \"elder_male\" | \"adult_female\" | \"narrator_female\" | \"young_female\" | \"child\"\n5. اختر emotionId من القيم التالية فقط:\n   - \"angry_shout\" | \"fear_whisper\" | \"child_fear\" | \"crying_sad\" | \"sarcastic_cold\" | \"shock_surprise\" | \"happy_warm\" | \"dramatic_narrator\" | \"natural_dialogue\"\n6. اختر intensity من القيم التالية فقط:\n   - \"normal\" | \"strong\" | \"max\"";
+const rdPers = (id) => RD_P.find((p) => p.id === id) || RD_P[0];
+const rdByArch = (a) => RD_P.find((p) => p.a === a);
+function rdDsp(pcm16, pitch) { // بصمة الشخصية (طبقة) + فلتر الدفء — زي الأداة بالظبط
+  let x = pcm16;
+  if (pitch && Math.abs(pitch - 1) >= 0.01) {
+    const n = Math.floor(pcm16.length / pitch), o = new Int16Array(n);
+    for (let i = 0; i < n; i++) { const s = i * pitch, i0 = Math.floor(s), i1 = Math.min(pcm16.length - 1, i0 + 1), f = s - i0; o[i] = Math.round(pcm16[i0] * (1 - f) + pcm16[i1] * f); }
+    x = o;
+  }
+  const h = new Int16Array(x.length); let prev = 0;
+  for (let i = 0; i < x.length; i++) { const sm = (x[i] / 32768) * 0.88 + prev * 0.12; prev = sm; const w = Math.tanh(sm * 1.12) / Math.tanh(1.12); h[i] = Math.max(-32767, Math.min(32767, Math.round(w * 32767))); }
+  return h;
+}
+async function rdAnalyze(env, text, conf) { // التحليل الذكي: مقاطع (راوي + شخصيات) بالترتيب مع الانفعال والتشكيل
+  const body = JSON.stringify({ contents: [{ parts: [{ text }] }], systemInstruction: { parts: [{ text: RD_SYS }] }, generationConfig: { responseMimeType: 'application/json', responseSchema: { type: 'ARRAY', items: { type: 'OBJECT', properties: { type: { type: 'STRING' }, speaker: { type: 'STRING' }, speakerArchetype: { type: 'STRING' }, dialect: { type: 'STRING' }, emotionId: { type: 'STRING' }, intensity: { type: 'STRING' }, actingDirection: { type: 'STRING' }, text: { type: 'STRING' }, phoneticText: { type: 'STRING' } }, propertyOrdering: ['type', 'speaker', 'speakerArchetype', 'dialect', 'emotionId', 'intensity', 'actingDirection', 'text', 'phoneticText'] } } } });
+  for (const model of ['gemini-3-flash-preview', conf.annModel || 'gemini-2.5-flash']) {
+    try {
+      const r = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(70000), headers: { 'Content-Type': 'application/json' }, body });
+      if (r.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r); throw e; }
+      if (!r.ok) continue;
+      const j = await r.json(), t = (((j.candidates || [])[0] || {}).content || {}).parts;
+      const arr = JSON.parse((t || []).map((x) => x.text || '').join(''));
+      if (Array.isArray(arr) && arr.length) return arr;
+    } catch (e) { if (e.code === 429) throw e; }
+  }
+  return null;
+}
+async function rdSpeak(env, seg, persona, conf) { // صوت مقطع واحد بنفس تعليمات الأداة
+  const emo = RD_E[seg.emotionId] || RD_E.natural_dialogue, it = RD_I[seg.intensity] || RD_I.strong, dlg = seg.type === 'dialogue';
+  let script = dlg ? applyEgyptianPhonetics((seg.phoneticText && seg.phoneticText.trim()) || seg.text) : seg.text;
+  if ((seg.emotionId === 'fear_whisper' || seg.emotionId === 'crying_sad' || seg.emotionId === 'child_fear') && !script.includes('..')) script = script.replace(/،\s+/g, '.. ');
+  const ins = dlg
+    ? 'أنت إنسان مصري حقيقي وممثل دراما محترف تؤدي دور «' + seg.speaker + '» (' + persona.i + ').\nتحدث بلهجة عامية مصرية قاهرية بشرية تلقائية وطبيعية 100% كأنك تتحدث في الواقع وليس كقارئ آلي:\n- وصل الكلام ببعضه بنعومة واخطف الحروف المصرية بشكل طبيعي بدون تقطيع بين الكلمات.\n- انطق الجيم مصرية غير معطشة (G) دائماً، والتزم بالنطق المصري للكلمات المشكّلة أمامك، ولا تفخم الكلمات أو تحولها للفصحى أبداً.\n- جسّد الإحساس البشري الحقيقي الآن (' + it.l + '): ' + emo.e + ' — ' + (seg.actingDirection || '') + ' (' + it.b + ').\nانطق الجملة التالية فقط بتلقائية بشرية كاملة:\n\n' + script
+    : 'أنت ممثل صوتي بشري محترف تؤدي دور «' + seg.speaker + '» (' + persona.i + ').\nتحدث باللغة العربية الفصحى السليمة بأداء بشري دافئ وطبيعي بعيد تماماً عن الرتابة الآلية.\nالانفعال والأداء التمثيلي المطلوب الآن (' + it.l + '): ' + emo.m + ' — ' + (seg.actingDirection || '') + '.\nاقرأ النص التالي فقط:\n\n' + script;
+  const body = JSON.stringify({ contents: [{ parts: [{ text: ins }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: persona.v } } } } });
+  const need = String(seg.text).replace(/\s/g, '').length;
+  for (let k = 0; k < 3; k++) {
+    let r = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json' }, body });
+    if (r.status === 429) { const d = await q429(r); if (/PerDay|per day/i.test(d)) { const e = new Error('busy'); e.code = 429; e.detail = d; throw e; } await new Promise((s) => setTimeout(s, 4000)); r = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json' }, body }); if (r.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r); throw e; } }
+    if (!r.ok) { if (k < 2 && r.status >= 500) continue; const e = new Error('gemini_' + r.status); e.code = 502; throw e; }
+    const b = findAudioB64(await r.json()); if (!b) continue;
+    const raw = wavPcm(toWav(b)), pcm16 = new Int16Array(raw.slice().buffer, 0, raw.length >> 1);
+    if (need < 25 || pcm16.length / 24000 >= need / 20) return rdDsp(pcm16, persona.p);
+  }
+  const e = new Error('short_audio'); e.code = 502; e.detail = 'صوت ناقص من جوجل — هيتعاد'; throw e;
+}
+async function radadPart(env, text, conf, ctx, nid) {
+  const segs = await rdAnalyze(env, text, conf);
+  if (!segs) return geminiPart(env, text, conf, ctx); // لو التحليل فشل: المسار القديم بدل ما الفصل يقف
+  const regKey = 'rdreg_' + (nid || 'x'); let reg = {}; try { reg = (await getSetting(env, regKey)) || {}; } catch (e) {}
+  let dirty = false; const items = [];
+  for (const s of segs) {
+    const clean = String(s.text || '').replace(/^[-–—•]\s*/, '').trim(); if (!clean) continue;
+    const sp = String(s.speaker || 'الراوي').trim() || 'الراوي', dlg = s.type !== 'narration' && sp !== 'الراوي';
+    let pid = reg[sp];
+    if (!pid) { const p = sp === 'الراوي' ? rdPers('kareem') : (rdByArch(s.speakerArchetype) || rdPers('tarek')); pid = p.id; reg[sp] = pid; dirty = true; }
+    items.push({ type: dlg ? 'dialogue' : 'narration', speaker: sp, text: clean, phoneticText: String(s.phoneticText || '').replace(/^[-–—•]\s*/, '').trim(), emotionId: RD_E[s.emotionId] ? s.emotionId : 'natural_dialogue', intensity: RD_I[s.intensity] ? s.intensity : 'strong', actingDirection: s.actingDirection || 'أداء تمثيلي مصري صادق ومعبر', pid });
+  }
+  if (!items.length) return geminiPart(env, text, conf, ctx);
+  if (dirty) { try { await setSetting(env, regKey, reg); } catch (e) {} }
+  const pcms = new Array(items.length); let nxt = 0;
+  await Promise.all(Array.from({ length: Math.min(3, items.length) }, async () => { while (nxt < items.length) { const i = nxt++; pcms[i] = await rdSpeak(env, items[i], rdPers(items[i].pid), conf); } }));
+  const gap = new Int16Array(Math.round(24000 * 0.38)); let n = 0; pcms.forEach((p, i) => { n += p.length + (i ? gap.length : 0); });
+  const all = new Int16Array(n); let o = 0; pcms.forEach((p, i) => { if (i) o += gap.length; all.set(p, o); o += p.length; });
+  return { wav: pcmToWav(new Uint8Array(all.buffer), 24000), chars: items.reduce((a, x) => a + x.text.length, 0), calls: items.length + 1 };
+}
+
 async function geminiPart(env, text, conf, ctx) { // جزء واحد: أدوار متعددة (حد أقصى متكلمين اثنين في الطلب)
   const runs = mergeRuns(applyDict(conf.multi ? await smartRoles(env, text, conf, ctx) : [{ role: 'narrator', text: stripMarks(text) }], conf).map((r) => (r.role === 'narrator' || r.tg || conf.phon === false ? r : { ...r, text: egyPhon(r.text) })), conf.econ ? 2 : 4, conf.econ ? 150 : 45), groups = []; let cur = null;
   for (const r of runs) { if (!cur || (!cur.roles.has(r.role) && cur.roles.size >= (conf.mm ? 2 : 1))) { cur = { roles: new Set(), items: [] }; groups.push(cur); } cur.roles.add(r.role); cur.items.push(r); }
@@ -1305,7 +1377,7 @@ async function azurePart(env, text, conf, ctx) {
   const runs = applyDict(conf.multi ? await smartRoles(env, text, conf, ctx) : [{ role: 'narrator', text: stripMarks(text) }], conf);
   const wav = await azureSpeakRuns(env, runs, conf); return { wav, chars: runs.reduce((a, r) => a + r.text.length, 0), calls: 1 };
 }
-const speakPart = (env, prov, text, conf, ctx) => (prov === 'azure' ? azurePart(env, text, conf, ctx) : geminiPart(gemEnv(env, prov), text, conf, ctx));
+const speakPart = (env, prov, text, conf, ctx, nid) => (prov === 'azure' ? azurePart(env, text, conf, ctx) : conf.radad !== false ? radadPart(gemEnv(env, prov), text, conf, ctx, nid) : geminiPart(gemEnv(env, prov), text, conf, ctx));
 const audioResp = (obj, hit) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'private, max-age=86400', 'X-Cache': hit ? 'HIT' : 'MISS' } });
 const CPS = 14; // حروف في الثانية تقريبًا (لتقدير المدة والتكلفة قبل التحويل)
 const hasMk = (t) => /[«“"]/.test(t) || /(^|\n)\s*[-–—]/.test(t);
@@ -1428,16 +1500,18 @@ async function ttsStep0(env, opts = {}) {
   const ch = await env.DB.prepare("SELECT * FROM tts_ch WHERE owner=? AND status='running'").bind(tok).first();
   if (!ch) return { ok: true, idle: 'empty', prov };
   let parts = JSON.parse(ch.parts || '[]');
-  if (conf.econ && ch.done === 0 && parts.length > 1 && Math.max(...parts.map((x) => x[1] - x[0])) <= 800) { // فصل لسه ما بدأش: نكبّر الأجزاء علشان الطلبات تقل
+  if (conf.radad !== false && ch.done === 0 && parts.length && Math.max(...parts.map((x) => x[1] - x[0])) > 1100) { const np = splitParts(ch.text, 900); if (np.length) { parts = np; await env.DB.prepare('UPDATE tts_ch SET parts=?,nparts=? WHERE id=?').bind(JSON.stringify(np), np.length, ch.id).run(); } }
+  if (conf.radad === false && conf.econ && ch.done === 0 && parts.length > 1 && Math.max(...parts.map((x) => x[1] - x[0])) <= 800) { // فصل لسه ما بدأش: نكبّر الأجزاء علشان الطلبات تقل
     const np = splitParts(ch.text, ECON_MX); if (np.length && np.length < parts.length) { parts = np; await env.DB.prepare('UPDATE tts_ch SET parts=?,nparts=? WHERE id=?').bind(JSON.stringify(np), np.length, ch.id).run(); }
   }
   let done = ch.done, secsTot = ch.secs, made = 0, err = '', hardFail = false, deadKey = false, limMsg = '';
   const t0 = Date.now();
-  while (done < parts.length && Date.now() - t0 < 22000 && made < 8 && used < cap) {
-    const idxs = []; for (let k = 0; k < par && done + k < parts.length && made + k < 8; k++) idxs.push(done + k);
+  const MADE_MX = conf.radad !== false ? 3 : 8;
+  while (done < parts.length && Date.now() - t0 < 22000 && made < MADE_MX && used < cap) {
+    const idxs = []; for (let k = 0; k < par && done + k < parts.length && made + k < MADE_MX; k++) idxs.push(done + k);
     const res = await Promise.allSettled(idxs.map(async (p) => {
       const txt = ch.text.slice(parts[p][0], parts[p][1]).trim();
-      const o = await speakPart(env, prov, txt, conf, ch.text.slice(Math.max(0, parts[p][0] - 600), parts[p][0]));
+      const o = await speakPart(env, prov, txt, conf, ch.text.slice(Math.max(0, parts[p][0] - 600), parts[p][0]), ch.nid);
       await env.TTS_BUCKET.put('c/' + ch.id + '/' + p + '.wav', o.wav, { httpMetadata: { contentType: 'audio/wav' } });
       return { secs: Math.max(0, o.wav.length - 44) / 48000, chars: o.chars, calls: o.calls };
     }));
@@ -2324,7 +2398,7 @@ async function route(request, env) {
       ROLES.forEach((r) => { const v = (ba.voices || {})[r]; if (v && typeof v === 'object') { const o = { ...cur.az.voices[r] }; if (/^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]{2,40}$/.test(String(v.v || ''))) o.v = String(v.v); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.rate || ''))) o.rate = String(v.rate); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.pitch || ''))) o.pitch = String(v.pitch); az.voices[r] = o; } });
       await setSetting(env, 'tts', { model: nm(b.model, cur.model), legacyModel: nm(b.legacyModel, cur.legacyModel), style: str(b.style, 200).trim() || cur.style, gv,
         concurrency: nu(b.concurrency, cur.concurrency, 1, 4), dailyMin: nu(b.dailyMin, cur.dailyMin, 0, 100000), freeMin: nu(b.freeMin, cur.freeMin, 0, 100000), priceIn: nu(b.priceIn, cur.priceIn, 0, 1000), priceOut: nu(b.priceOut, cur.priceOut, 0, 1000),
-        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, rebalance: b.rebalance == null ? cur.rebalance : !!b.rebalance, multi: b.multi == null ? cur.multi : !!b.multi, mm: b.mm == null ? cur.mm : !!b.mm, econ: b.econ == null ? cur.econ : !!b.econ, hideListen: b.hideListen == null ? cur.hideListen : !!b.hideListen, listenAll: b.listenAll == null ? cur.listenAll : !!b.listenAll, smart: b.smart == null ? cur.smart : !!b.smart, annModel: nm(b.annModel, cur.annModel), dict: b.dict == null ? cur.dict : String(b.dict).slice(0, 3000), az,
+        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, rebalance: b.rebalance == null ? cur.rebalance : !!b.rebalance, radad: b.radad == null ? cur.radad : !!b.radad, multi: b.multi == null ? cur.multi : !!b.multi, mm: b.mm == null ? cur.mm : !!b.mm, econ: b.econ == null ? cur.econ : !!b.econ, hideListen: b.hideListen == null ? cur.hideListen : !!b.hideListen, listenAll: b.listenAll == null ? cur.listenAll : !!b.listenAll, smart: b.smart == null ? cur.smart : !!b.smart, annModel: nm(b.annModel, cur.annModel), dict: b.dict == null ? cur.dict : String(b.dict).slice(0, 3000), az,
         g2: { dailyMin: nu((b.g2 || {}).dailyMin, cur.g2.dailyMin, 0, 100000), freeMin: nu((b.g2 || {}).freeMin, cur.g2.freeMin, 0, 100000), concurrency: nu((b.g2 || {}).concurrency, cur.g2.concurrency, 1, 4) },
         g3: { dailyMin: nu((b.g3 || {}).dailyMin, cur.g3.dailyMin, 0, 100000), freeMin: nu((b.g3 || {}).freeMin, cur.g3.freeMin, 0, 100000), concurrency: nu((b.g3 || {}).concurrency, cur.g3.concurrency, 1, 4) },
         g4: { dailyMin: nu((b.g4 || {}).dailyMin, cur.g4.dailyMin, 0, 100000), freeMin: nu((b.g4 || {}).freeMin, cur.g4.freeMin, 0, 100000), concurrency: nu((b.g4 || {}).concurrency, cur.g4.concurrency, 1, 4) },
@@ -2373,7 +2447,7 @@ async function route(request, env) {
         const nid = str(it.nid, 80), ix = parseInt(it.idx, 10), text = String(it.text || '').slice(0, 150000).trim(), sig = str(it.sig, 40);
         if (!nid || !(ix >= 0 && ix < 5000)) { skipped++; continue; }
         if (!text.includes('\n') && text.length < 120) { skipped++; continue; } // عنوان بس من غير نص الفصل: ما نحوّلوش
-        const parts = splitParts(text, conf.econ ? ECON_MX : 700); if (!parts.length) { skipped++; continue; }
+        const parts = splitParts(text, conf.radad !== false ? 900 : conf.econ ? ECON_MX : 700); if (!parts.length) { skipped++; continue; }
         const ntitle = str(it.ntitle, 120), ctitle = str(it.ctitle, 120); let ord = Math.max(-1e9, Math.min(1e9, parseInt(it.ord, 10) || 0));
         const ex = await env.DB.prepare('SELECT id,sig,prov,text,nparts,status FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
         const sib = await env.DB.prepare('SELECT prov,MIN(ord) AS o FROM tts_ch WHERE nid=?').bind(nid).first(), prov = conf.novelProv[nid] || (sib && sib.prov) || conf.defProv;
