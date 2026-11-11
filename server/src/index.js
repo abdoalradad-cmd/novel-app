@@ -385,6 +385,21 @@ function findAudioB64(o, depth = 0) {
   return '';
 }
 function toWav(b64) { const bytes = b64bytes(b64.replace(/\s+/g, '')); return String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) === 'RIFF' ? bytes : pcmToWav(bytes, 24000); }
+
+// أكتر من مفتاح للحساب (سطر لكل مفتاح): بيتبدّل تلقائي لو المفتاح خلّص أو اتحظر
+const GK = {};
+const gKeyList = (env) => String(env.GEMINI_API_KEY || '').split(/[\s,;]+/).filter((k) => k.length > 15);
+async function gFetch(env, url, init) {
+  const ks = gKeyList(env); if (!ks.length) return fetch(url, init);
+  const id = ks.join('|').slice(0, 40) + ks.length; let st = GK[id] || 0, last;
+  for (let i = 0; i < ks.length; i++) {
+    const k = ks[(st + i) % ks.length];
+    last = await fetch(url, { ...init, headers: { ...(init && init.headers), 'x-goog-api-key': k } });
+    if (last.status === 429 || last.status === 403 || last.status === 401 || (last.status === 400 && i < ks.length - 1 && /API key|api_key|expired/i.test(await last.clone().text().catch(() => '')))) { GK[id] = (st + i + 1) % ks.length; continue; }
+    GK[id] = (st + i) % ks.length; return last;
+  }
+  return last;
+}
 async function q429(r) { try { const t = await r.text(); let m = ''; try { const j = JSON.parse(t); m = (j.error && j.error.message) || ''; const d = JSON.stringify((j.error && j.error.details) || ''); const q = /"quotaId":"([^"]+)"/.exec(d); if (q) m += ' [' + q[1] + ']'; } catch (e) { m = t; } return String(m).slice(0, 260); } catch (e) { return ''; } }
 const pacificMinsLeft = () => { try { const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date()), h = +p.find((x) => x.type === 'hour').value, m = +p.find((x) => x.type === 'minute').value; return 24 * 60 - (h * 60 + m) + 2; } catch (e) { return 120; } };
 async function geminiSpeak(env, text, voiceName, conf, style) {
@@ -397,12 +412,12 @@ async function geminiSpeak0(env, text, voiceName, conf, style) {
   const key = env.GEMINI_API_KEY; if (!key) { const e = new Error('not_configured'); e.code = 503; throw e; }
   let lastErr;
   try {
-    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    const r = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
       body: JSON.stringify({ model: conf.model, input: [{ type: 'user_input', content: [{ type: 'text', text, annotations: [{ type: 'speech_metadata', style }] }] }], response_format: { type: 'audio' }, generation_config: { speech_config: [{ voice: voiceName }] } }) });
     if (r.status === 429) { const d = await q429(r); const e = new Error('busy'); e.code = 429; e.detail = d; throw e; }
     else if (r.ok) { const j = await r.json(); const b = findAudioB64(j); if (b) return toWav(b); lastErr = new Error('no_audio'); } else lastErr = new Error('gemini_' + r.status);
   } catch (e) { if (e.code === 429) throw e; lastErr = e; }
-  const r2 = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+  const r2 = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({ contents: [{ parts: [{ text: 'Read the following in a ' + style + ': ' + text }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } } } }) });
   if (r2.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r2); throw e; }
   if (!r2.ok) { const e = new Error('gemini_' + r2.status); e.code = 502; e.detail = lastErr && lastErr.message; throw e; }
@@ -500,11 +515,13 @@ function joinWavs(list) {
   let n = 0; pcms.forEach((p) => (n += p.length)); const all = new Uint8Array(n); let o = 0; pcms.forEach((p) => { all.set(p, o); o += p.length; }); return pcmToWav(all, 24000);
 }
 const ROLE_EN = { narrator: 'the narrator', man: 'an adult man', woman: 'an adult woman', boy: 'a young boy', girl: 'a young girl' };
-const roleStyle = (conf, role, emo) => (role === 'narrator' ? conf.style : conf.style + ', performing the character of ' + ROLE_EN[role] + (role === 'boy' || role === 'girl' ? ' with a childlike voice' : '')) + (emo ? ', acting it out: ' + emo : '');
+const DIA_N = 'narrating in clear Modern Standard Arabic (Fusha) with correct grammar and pronunciation, never colloquial';
+const DIA_C = 'speaking in 100% natural Egyptian colloquial Arabic (Cairene, hard "g" for jim), never Fusha';
+const roleStyle = (conf, role, emo) => (role === 'narrator' ? 'warm, expressive audiobook voice ' + DIA_N : 'warm, expressive audiobook acting, ' + DIA_C + ', performing the character of ' + ROLE_EN[role] + (role === 'boy' || role === 'girl' ? ' with a childlike voice' : '')) + (emo ? ', acting it out: ' + emo : '');
 async function geminiMulti(env, roleA, roleB, items, conf) { // سطرين متكلمين في طلب واحد
   const key = env.GEMINI_API_KEY, nm = { narrator: 'Narrator', man: 'Man', woman: 'Woman', boy: 'Boy', girl: 'Girl' };
-  const prompt = 'Perform this audiobook scene like a gifted voice actor in natural Egyptian Arabic, truly living the moment and reacting to what is happening (never robotic). Each line may carry a bracketed emotion/delivery direction after the speaker name: act it with that exact feeling and do NOT read the brackets aloud. ' + [roleA, roleB].filter((r) => r !== 'narrator').map((r) => nm[r] + ' is ' + ROLE_EN[r] + (r === 'boy' || r === 'girl' ? ' (use a childlike voice)' : '') + '.').join(' ') + '\n' + items.map((it) => nm[it.role] + (it.emo ? ' [' + it.emo + ']' : '') + ': ' + it.text).join('\n');
-  const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+  const prompt = 'Perform this audiobook scene like a gifted voice actor. STRICT DIALECT RULE: the Narrator reads in clear Modern Standard Arabic (Fusha); every character speaks 100% natural Egyptian colloquial Arabic (Cairene). Truly living the moment and reacting to what is happening (never robotic). Each line may carry a bracketed emotion/delivery direction after the speaker name: act it with that exact feeling and do NOT read the brackets aloud. ' + [roleA, roleB].filter((r) => r !== 'narrator').map((r) => nm[r] + ' is ' + ROLE_EN[r] + (r === 'boy' || r === 'girl' ? ' (use a childlike voice)' : '') + '.').join(' ') + '\n' + items.map((it) => nm[it.role] + (it.emo ? ' [' + it.emo + ']' : '') + ': ' + it.text).join('\n');
+  const r = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { multiSpeakerVoiceConfig: { speakerVoiceConfigs: [roleA, roleB].map((ro) => ({ speaker: nm[ro], voiceConfig: { prebuiltVoiceConfig: { voiceName: conf.gv[ro] } } })) } } } }) });
   if (r.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r); throw e; }
   if (!r.ok) { const e = new Error('gemini_' + r.status); e.code = 502; throw e; }
@@ -524,7 +541,7 @@ async function smartRoles(env, text, conf, ctx) {
       + 'Keep each character consistent across the excerpt and the context. A speech tag like "قالت سلمى" belongs to narrator but tells you the speaker of the neighbouring spoken segment. Use boy/girl only for clearly young children. '
       + 'ALSO act like a director: for EACH segment give "e", a SHORT English performance direction (max 8 words) describing how the speaker feels and sounds right now, taken from the scene and from descriptions such as "قال بغضب", "قالت وهي تبكي", "همس", "صرخ", "ابتسم" (e.g. "furious, shouting through clenched teeth", "trembling, on the verge of tears", "soft, tender whisper", "tense suspenseful narration"). Use "" only if truly neutral. '
       + 'Return ONLY a JSON array of exactly ' + base.length + ' objects {"r":role,"e":direction}, one per segment, in order.\n\nCONTEXT (before):\n' + String(ctx || '').slice(-600) + '\n\nEXCERPT:\n' + list;
-    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + conf.annModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(9000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    const r = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/models/' + conf.annModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(9000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0, thinkingConfig: { thinkingBudget: 0 }, responseMimeType: 'application/json', responseSchema: { type: 'ARRAY', items: { type: 'OBJECT', properties: { r: { type: 'STRING', enum: ROLE_ENUM }, e: { type: 'STRING' } }, required: ['r', 'e'] } } } }) });
     if (!r.ok) return base;
     const j = await r.json(), t = (((j.candidates || [])[0] || {}).content || {}).parts; const arr = JSON.parse((t || []).map((x) => x.text || '').join(''));
@@ -778,7 +795,7 @@ async function ttsStats(env) {
   const sum = async (prov, where, ...a) => env.DB.prepare('SELECT COALESCE(SUM(reqs),0) AS reqs,COALESCE(SUM(chars),0) AS chars,COALESCE(SUM(secs),0) AS secs,COALESCE(SUM(cost),0) AS cost,COALESCE(SUM(fails),0) AS fails,COALESCE(SUM(limited),0) AS limited FROM tts_use WHERE prov=? AND ' + where).bind(prov, ...a).first();
   const { results: novels } = await env.DB.prepare("SELECT nid,MAX(ntitle) AS title,MIN(ord) AS ord,MAX(prov) AS prov,COUNT(*) AS n,SUM(status='done') AS d,SUM(CASE WHEN status='running' AND lock_until>"+Date.now()+" THEN 1 ELSE 0 END) AS run,SUM(LENGTH(text)) AS chars,SUM(CASE WHEN status='done' THEN 0 ELSE LENGTH(text)*(1.0-done*1.0/(CASE WHEN nparts<1 THEN 1 ELSE nparts END)) END) AS rem FROM tts_ch GROUP BY nid ORDER BY MIN(ord),nid LIMIT 120").all();
   const q = await env.DB.prepare('SELECT prov,status,COUNT(*) AS n FROM tts_ch GROUP BY prov,status').all();
-  const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { ...Object.fromEntries(PROVS.filter(isGoogle).map((p) => [p, !!gemKey(env, p)])), azure: !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)), azureKey: !!env.AZURE_SPEECH_KEY, azureRegion: azRegion(env, conf) }, prov: {}, keys: Object.fromEntries(Object.entries(await savedKeys(env)).map(([p, v]) => [p, v ? 'app' : ''])), prices: pr,
+  const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { ...Object.fromEntries(PROVS.filter(isGoogle).map((p) => [p, !!gemKey(env, p)])), azure: !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)), azureKey: !!env.AZURE_SPEECH_KEY, azureRegion: azRegion(env, conf) }, prov: {}, nkeys: Object.fromEntries(PROVS.filter(isGoogle).map((p) => [p, gKeyList({ GEMINI_API_KEY: gemKey(env, p) }).length])), keys: Object.fromEntries(Object.entries(await savedKeys(env)).map(([p, v]) => [p, v ? 'app' : ''])), prices: pr,
     chapters: { queued: 0, running: 0, done: 0, failed: 0 }, novels: novels.map((r) => ({ nid: r.nid, title: r.title, ord: r.ord, prov: r.prov, n: r.n, d: r.d || 0, run: r.run || 0, rem: Math.round(r.rem || 0) })) };
   q.results.forEach((r) => (out.chapters[r.status] = (out.chapters[r.status] || 0) + r.n));
   out.hasKey = out.has.gemini;
@@ -1687,12 +1704,18 @@ async function route(request, env) {
     }
     // ترتيب رواية برقم: pos = ترتيبها بين الروايات اللي لسه بتتحوّل
     if (path === '/api/admin/tts/key' && m === 'POST') {
-      const b = await body(request, 2000), prov = b.prov;
-      // تنضيف اللصق: مسافات/أسطر/رموز مخفية/علامات تنصيص/كلمة key= أو Bearer
-      let key = String(b.key || '').normalize('NFKC').replace(/[\s\u200B-\u200F\u202A-\u202E\u2060\uFEFF"'`<>]/g, '').replace(/^(bearer|key=|apikey=|api_key=|x-goog-api-key:)/i, '');
-      const am = /AIza[A-Za-z0-9_-]{30,60}/.exec(key); if (am) key = am[0];
+      const b = await body(request, 6000), prov = b.prov;
+      // أكتر من مفتاح: كل مفتاح في سطر (أو مفصولين بمسافة/فاصلة). بنضّف كل واحد لوحده ونشيل المكرر
+      const ks = [];
+      String(b.key || '').split(/[\n\r,;]+/).forEach((raw) => {
+        let k = raw.normalize('NFKC').replace(/[\s\u200B-\u200F\u202A-\u202E\u2060\uFEFF"'`<>]/g, '').replace(/^(bearer|key=|apikey=|api_key=|x-goog-api-key:)/i, '');
+        const am = /AIza[A-Za-z0-9_-]{30,60}/.exec(k); if (am) k = am[0];
+        if (k) ks.push(k);
+      });
       if (!PROVS.includes(prov) || !isGoogle(prov)) return fail('حساب جوجل غير صحيح');
-      if (key && !/^[A-Za-z0-9_.-]{20,140}$/.test(key)) return fail('المفتاح شكله غلط (طوله ' + key.length + ' وفيه رموز غريبة) — انسخه كامل من Google AI Studio');
+      for (const k of ks) if (!/^[A-Za-z0-9_.-]{20,140}$/.test(k)) return fail('مفتاح شكله غلط (طوله ' + k.length + ') — انسخه كامل من Google AI Studio، كل مفتاح في سطر');
+      if (ks.length > 40) return fail('أقصى عدد 40 مفتاح للحساب');
+      const key = [...new Set(ks)].join('\n');
       const cur = await getSetting(env, 'tts_keys'); if (key) cur[prov] = key; else delete cur[prov];
       await setSetting(env, 'tts_keys', cur); KC = { at: 0, v: null };
       return json({ ok: true, ...(await ttsStats(await withKeys(env.__base || env))) });
@@ -1753,7 +1776,7 @@ async function route(request, env) {
         return json({ ok: r.ok, status: r.status, voices: list, raw: list.length ? undefined : t.slice(0, 400) });
       }
       if (!gkey) return fail('مفتاح Gemini مش متحط على السيرفر', 503);
-      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/voices?pageSize=200', { headers: { 'x-goog-api-key': gkey } });
+      const r = await gFetch(gemEnv(env, prov), 'https://generativelanguage.googleapis.com/v1beta/voices?pageSize=200', { headers: { 'x-goog-api-key': gkey } });
       const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
       const list = j && Array.isArray(j.voices) ? j.voices.map((v) => ({ name: v.name || v.voiceName || v.id, lang: v.languageCodes || v.language || v.locale || '', gender: v.gender || '' })) : [];
       return json({ ok: r.ok, status: r.status, voices: list, raw: list.length ? undefined : t.slice(0, 600) });
