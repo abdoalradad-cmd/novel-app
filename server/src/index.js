@@ -119,6 +119,7 @@ async function ensureSchema(env) {
     'CREATE TABLE IF NOT EXISTS sessions (uid INTEGER NOT NULL, dev TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (uid, dev))',
     'CREATE TABLE IF NOT EXISTS presence (dev TEXT PRIMARY KEY, uid INTEGER NOT NULL DEFAULT 0, ip TEXT NOT NULL DEFAULT \'\', seen INTEGER NOT NULL DEFAULT 0)',
     'CREATE INDEX IF NOT EXISTS idx_presence_seen ON presence(seen)',
+    'CREATE TABLE IF NOT EXISTS gone_sent (uid INTEGER PRIMARY KEY, lvl INTEGER NOT NULL DEFAULT 0, seen INTEGER NOT NULL DEFAULT 0, ts INTEGER NOT NULL DEFAULT 0)',
     'CREATE TABLE IF NOT EXISTS visits (day TEXT NOT NULL, dev TEXT NOT NULL, uid INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, dev))',
     "CREATE TABLE IF NOT EXISTS bcast (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS contact (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL DEFAULT 0)",
@@ -1091,6 +1092,287 @@ const EGYPTIAN_PHONETIC_LEXICON = {
   'معاه': 'مَعَاه',
   'معاها': 'مَعَاهَا',
   'معانا': 'مَعَانَا',
+
+  // === V10.2: كلمات مصرية بقاف مهموزة (مصدقني = مِصَدِّأْنِي) وما شابهها ===
+  'مصدقني': 'مِصَدِّأْنِي',
+  'مصدقنيش': 'مِصَدِّأْنِيش',
+  'مصدقاني': 'مِصَدِّأَانِي',
+  'مصدقانيش': 'مِصَدِّأَانِيش',
+  'مصدقاه': 'مِصَدِّأَاه',
+  'مصدقه': 'مِصَدِّأُه',
+  'مصدقهاش': 'مِصَدِّأْهَاش',
+  'مصدق': 'مِصَدِّأ',
+  'مصدقة': 'مِصَدِّأَة',
+  'مصدقين': 'مِصَدِّأِين',
+  'صدقني': 'صَدِّأْنِي',
+  'صدقيني': 'صَدِّأِينِي',
+  'صدقت': 'صَدَّأْت',
+  'بصدق': 'بَصَدَّأ',
+  'بتصدق': 'بِتْصَدَّأ',
+  'هصدق': 'هَصَدَّأ',
+  'مصدقش': 'مِصَدِّأْش',
+  'مستغرب': 'مِسْتَغْرِب',
+  'مستغربة': 'مِسْتَغْرِبَة',
+  'متأكد': 'مِتَأَكِّد',
+  'متأكدة': 'مِتَأَكِّدَة',
+  'متأكدش': 'مِتَأَكِّدْش',
+  'مقتنع': 'مُقْتَنِع',
+  'مقتنعش': 'مُقْتَنِعْش',
+  'متخيل': 'مِتْخَيِّل',
+  'متخيلش': 'مِتْخَيِّلْش',
+  'مصدوم': 'مَصْدُوم',
+  'مصدومة': 'مَصْدُومَة',
+  'متضايقة': 'مِتْضَايْقَة',
+  'مستحيل': 'مُسْتَحِيل',
+  'معقولة': 'مَعْقُولَة',
+  'مصدقناش': 'مِصَدِّأْنَاش',
+  'مصدقتش': 'مَصَدَّأْتِش',
+  'صدقتك': 'صَدَّأْتَك',
+  'صدقتني': 'صَدَّأْتِنِي',
+
+  // === V10.3: توسعة ثالثة للقاموس المصري (يومي، مشاعر، عائلة، مدينة، أكل، مواصلات) ===
+  'مين': 'مِين',
+  'كام': 'كَام',
+  'ايوه': 'أَيْوَه',
+  'أيوه': 'أَيْوَه',
+  'ايوة': 'أَيْوَه',
+  'لأ': 'لَأ',
+  'اه': 'آه',
+  'أه': 'آه',
+  'جدا': 'جِدًّا',
+  'شوية': 'شُوَيَّة',
+  'شويه': 'شُوَيَّة',
+  'شوي': 'شُوَيّ',
+  'كتيير': 'كِتِير',
+  'قليل': 'قَلِيل',
+  'بسرعة': 'بِسُرْعَة',
+  'بالراحة': 'بِالرَّاحَة',
+  'براحة': 'بِرَاحَة',
+  'حالا': 'حَالَا',
+  'بعدين': 'بَعْدِين',
+  'وقتها': 'وَقْتِهَا',
+  'ساعتها': 'سَاعْتِهَا',
+  'كله': 'كُلُّه',
+  'كلها': 'كُلُّهَا',
+  'كلنا': 'كُلِّنَا',
+  'كلكم': 'كُلُّكُم',
+  'بعضنا': 'بَعْضِينَا',
+  'بقا': 'بَقَى',
+  'ينفع': 'يِنْفَع',
+  'ينفعش': 'يِنْفَعْش',
+  'يصح': 'يِصِحّ',
+  'يصحش': 'يِصِحِّش',
+  'مممكنش': 'مُمْكِنْش',
+  'يمكن': 'يُمْكِن',
+  'احتمال': 'اِحْتِمَال',
+  'بيحب': 'بِيِحِبّ',
+  'بيكره': 'بِيِكْرَه',
+  'بيعرف': 'بِيِعْرَف',
+  'بيروح': 'بِيرُوح',
+  'بيجي': 'بِيجِي',
+  'بياكل': 'بِيَاكُل',
+  'بيشرب': 'بِيِشْرَب',
+  'بينام': 'بِينَام',
+  'بيشتغل': 'بِيِشْتِغِل',
+  'بيفكر': 'بِيْفَكَّر',
+  'بتحبني': 'بِتِحِبَّنِي',
+  'بتكرهني': 'بِتِكْرَهْنِي',
+  'بتسمعني': 'بِتِسْمَعْنِي',
+  'بتفهمني': 'بِتِفْهَمْنِي',
+  'بتعرفني': 'بِتِعْرَفْنِي',
+  'بتسيبني': 'بِتِسِيبْنِي',
+  'مبقاش': 'مَبْقَاش',
+  'مبقتش': 'مَبْقِتْش',
+  'مابقتش': 'مَابْقِتْش',
+  'ماعدش': 'مَاعَدْش',
+  'مبقيتش': 'مَبْقِيتِش',
+  'مرضيتش': 'مَرْضِيتِش',
+  'مرضاش': 'مَرْضَاش',
+  'مسمعتش': 'مَسْمَعْتِش',
+  'ماسمعتش': 'مَاسْمَعْتِش',
+  'فاكر': 'فَاكِر',
+  'فاكرة': 'فَاكْرَة',
+  'افتكرت': 'اِفْتَكَرْت',
+  'افتكر': 'اِفْتَكَر',
+  'حاسس': 'حَاسِس',
+  'حاسة': 'حَاسَّة',
+  'شايف': 'شَايِف',
+  'شايفة': 'شَايْفَة',
+  'سامع': 'سَامِع',
+  'سامعة': 'سَامْعَة',
+  'يخرب': 'يِخْرَب',
+  'يخربيتك': 'يِخْرَبِيتَك',
+  'يخربيتها': 'يِخْرَبِيتْهَا',
+  'ياخي': 'يَاخِي',
+  'جدع': 'جَدَع',
+  'جدعنة': 'جَدْعَنَة',
+  'شهم': 'شَهْم',
+  'اصيل': 'أَصِيل',
+  'أصيل': 'أَصِيل',
+  'محترم': 'مُحْتَرَم',
+  'محترمة': 'مُحْتَرَمَة',
+  'مزاجي': 'مِزَاجِي',
+  'رايق': 'رَايِق',
+  'رايقة': 'رَايْقَة',
+  'مضايق': 'مِضَايِق',
+  'زهق': 'زَهَق',
+  'مللت': 'مَلِّيت',
+  'قرفان': 'قَرْفَان',
+  'قرف': 'قَرَف',
+  'غلطان': 'غَلْطَان',
+  'غلطانة': 'غَلْطَانَة',
+  'حقيقي': 'حَقِيقِي',
+  'كدب': 'كِدْب',
+  'كدبة': 'كِدْبَة',
+  'بتكدب': 'بِتِكْدِب',
+  'بتكذب': 'بِتِكْدِب',
+  'بكدب': 'بَكْدِب',
+  'السر': 'السِّرّ',
+  'اسرار': 'أَسْرَار',
+  'أسرار': 'أَسْرَار',
+  'مصيبة': 'مُصِيبَة',
+  'مشكلة': 'مُشْكِلَة',
+  'مشاكل': 'مَشَاكِل',
+  'ازمة': 'أَزْمَة',
+  'أزمة': 'أَزْمَة',
+  'الحل': 'الحَلّ',
+  'جريمة': 'جَرِيمَة',
+  'قاتل': 'قَاتِل',
+  'قتلته': 'قَتَلْتُه',
+  'قتلتها': 'قَتَلْتْهَا',
+  'عايش': 'عَايِش',
+  'عايشة': 'عَايْشَة',
+  'هرب': 'هَرَب',
+  'هربت': 'هِرِبْت',
+  'اهرب': 'اِهْرَب',
+  'اجري': 'اِجْرِي',
+  'اجرى': 'اِجْرِي',
+  'امسك': 'اِمْسِك',
+  'امسكه': 'اِمْسِكُه',
+  'اضربه': 'اِضْرَبُه',
+  'بوليس': 'بُولِيس',
+  'ظابط': 'ضَابِط',
+  'ضابط': 'ضَابِط',
+  'نيابة': 'نِيَابَة',
+  'محكمة': 'مَحْكَمَة',
+  'محامي': 'مُحَامِي',
+  'سجن': 'سِجْن',
+  'مستشفى': 'مُسْتَشْفَى',
+  'المستشفى': 'المُسْتَشْفَى',
+  'ممرضة': 'مُمَرِّضَة',
+  'دوا': 'دَوَا',
+  'الدوا': 'الدَّوَا',
+  'مريض': 'مَرِيض',
+  'مريضة': 'مَرِيضَة',
+  'جامعة': 'جَامْعَة',
+  'الجامعة': 'الجَامْعَة',
+  'امتحان': 'اِمْتِحَان',
+  'الامتحان': 'الاِمْتِحَان',
+  'مذاكرة': 'مُذَاكْرَة',
+  'عربية': 'عَرَبِيَّة',
+  'العربية': 'العَرَبِيَّة',
+  'تاكسي': 'تَاكْسِي',
+  'ميكروباص': 'مِيكْرُوبَاص',
+  'مترو': 'مِتْرُو',
+  'شارع': 'شَارِع',
+  'الشارع': 'الشَّارِع',
+  'حارة': 'حَارَة',
+  'الحارة': 'الحَارَة',
+  'كباية': 'كُبَّايَة',
+  'كوباية': 'كُوبَايَة',
+  'ملعقة': 'مِلْعَقَة',
+  'شوكة': 'شُوكَة',
+  'سكينة': 'سِكِّينَة',
+  'عيش': 'عِيش',
+  'العيش': 'العِيش',
+  'اكل': 'أَكْل',
+  'أكل': 'أَكْل',
+  'الاكل': 'الأَكْل',
+  'شاي': 'شَايْ',
+  'قهوة': 'قَهْوَة',
+  'قهوه': 'قَهْوَة',
+  'فطار': 'فُطَار',
+  'غدا': 'غَدَا',
+  'عشا': 'عَشَا',
+  'عشاء': 'عَشَاء',
+  'سندوتش': 'سَنْدْوِتْش',
+  'فول': 'فُول',
+  'طعمية': 'طَعْمِيَّة',
+  'كشري': 'كُشَرِي',
+  'ملوخية': 'مُلُوخِيَّة',
+  'محشي': 'مَحْشِي',
+  'فراخ': 'فِرَاخ',
+  'لحمة': 'لَحْمَة',
+  'القاهرة': 'القَاهِرَة',
+  'اسكندرية': 'إِسْكَنْدَرِيَّة',
+  'إسكندرية': 'إِسْكَنْدَرِيَّة',
+  'الصعيد': 'الصَّعِيد',
+  'صعيدي': 'صَعِيدِي',
+  'بلدنا': 'بَلَدْنَا',
+  'مبروك': 'مَبْرُوك',
+  'عقبال': 'عُقْبَال',
+  'عقبالك': 'عُقْبَالَك',
+  'عقبالنا': 'عُقْبَالْنَا',
+  'تسلم': 'تِسْلَم',
+  'تسلمي': 'تِسْلَمِي',
+  'شكرا': 'شُكْرًا',
+  'متشكر': 'مِتْشَكِّر',
+  'متشكرة': 'مِتْشَكِّرَة',
+  'العفو': 'العَفْو',
+  'عفوا': 'عَفْوًا',
+  'اتفضل': 'اِتْفَضَّل',
+  'اتفضلي': 'اِتْفَضَّلِي',
+  'اتفضلوا': 'اِتْفَضَّلُوا',
+  'اسف': 'آسِف',
+  'آسف': 'آسِف',
+  'آسفة': 'آسْفَة',
+  'اسفة': 'آسْفَة',
+  'سامحني': 'سَامِحْنِي',
+  'سامحيني': 'سَامِحِينِي',
+  'اهلا': 'أَهْلًا',
+  'أهلا': 'أَهْلًا',
+  'مرحبا': 'مَرْحَبًا',
+  'تصبح': 'تِصْبَح',
+  'تصبحي': 'تِصْبَحِي',
+  'وداعا': 'وَدَاعًا',
+  'وحشتني': 'وَحَشْتِنِي',
+  'وحشتيني': 'وَحَشْتِينِي',
+  'وحشتوني': 'وَحَشْتُونِي',
+  'اتأخرت': 'اِتْأَخَّرْت',
+  'اتأخر': 'اِتْأَخَّر',
+  'اتاخرت': 'اِتْأَخَّرْت',
+  'لحقت': 'لِحِقْت',
+  'لحق': 'لِحِق',
+  'فاتني': 'فَاتْنِي',
+  'فاتك': 'فَاتَك',
+  'تعبتني': 'تَعَّبْتِنِي',
+  'ارحمني': 'اِرْحَمْنِي',
+  'ارحمي': 'اِرْحَمِي',
+  'فضيحة': 'فَضِيحَة',
+  'فضحتني': 'فَضَحْتِنِي',
+  'روحي': 'رُوحِي',
+  'عمري': 'عُمْرِي',
+  'حياتي': 'حَيَاتِي',
+  'سنين': 'سِنِين',
+  'سنتين': 'سَنَتِين',
+  'اسبوع': 'أُسْبُوع',
+  'أسبوع': 'أُسْبُوع',
+  'يومين': 'يُومِين',
+  'ساعتين': 'سَاعْتِين',
+  'دقيقة': 'دَقِيقَة',
+  'دقايق': 'دَقَايِق',
+  'لحظة': 'لَحْظَة',
+  'اتنين': 'اِتْنِين',
+  'تلاتة': 'تَلَاتَة',
+  'اربعة': 'أَرْبَعَة',
+  'أربعة': 'أَرْبَعَة',
+  'خمسة': 'خَمْسَة',
+  'ستة': 'سِتَّة',
+  'سبعة': 'سَبْعَة',
+  'تمانية': 'تَمَانْيَة',
+  'تسعة': 'تِسْعَة',
+  'ميه': 'مِيَّة',
+  'مية': 'مِيَّة',
 };
 
 /**
@@ -1099,6 +1381,43 @@ const EGYPTIAN_PHONETIC_LEXICON = {
  * - لا يحول حرف القاف إلى همزة مكتوبة (حتى لا تتشوه الكلمات مثل دلوقتي أو رقبتي)
  * - يحول التراكيب الخليجية المشتركة مثل "والله ما كان قصدي" إلى التركيب المصري "والله مَكانش قَصدي"
  */
+// ---------------------------------------------------------------------------
+// V10.3: لفظ الجلالة بالنطق المصري (تفخيم بعد الفتح والضم، ترقيق بعد الكسر)
+// ---------------------------------------------------------------------------
+function applyAllahPronunciation(text) {
+  if (!text) return text;
+  const AR = '\u0621-\u064A';
+  const B = '(?<![' + AR + '])';
+  const A = '(?![' + AR + '])';
+  let t = text;
+
+  const fixed = [
+    [/الحمد\s*لله/g, 'الحَمْدُ لِلَّه'],
+    [/الحمدلله/g, 'الحَمْدُ لِلَّه'],
+    [/إن\s*شاء\s*الله|ان\s*شاء\s*الله|إنشالله|انشالله/g, 'إِنْ شَاءَ اللَّاه'],
+    [/ما\s*شاء\s*الله|ماشاء\s*الله|ماشالله/g, 'مَا شَاءَ اللَّاه'],
+    [/بسم\s*الله/g, 'بِسْمِ اللَّه'],
+    [/سبحان\s*الله/g, 'سُبْحَانَ اللَّاه'],
+    [/لا\s*إله\s*إلا\s*الله|لا\s*اله\s*الا\s*الله/g, 'لَا إِلَهَ إِلَّا اللَّاه'],
+    [/استغفر\s*الله|أستغفر\s*الله|استغفرالله/g, 'أَسْتَغْفِرُ اللَّاه'],
+    [/جزاك\s*الله\s*خير(?:ا|اً)?/g, 'جَزَاكَ اللَّاهُ خَيْرًا'],
+    [/يا\s*الله|ياالله/g, 'يَا اللَّاه'],
+    [/في\s*سبيل\s*الله/g, 'فِي سَبِيلِ اللَّه'],
+    [/في\s*أمان\s*الله/g, 'فِي أَمَانِ اللَّه'],
+    [/عبد\s*الله/g, 'عَبْدِ اللَّه']
+  ];
+  for (const [re, val] of fixed) t = t.replace(re, val);
+
+  t = t
+    .replace(new RegExp(B + 'بالله' + A, 'g'), 'بِاللَّه')
+    .replace(new RegExp(B + 'لله' + A, 'g'), 'لِلَّه')
+    .replace(new RegExp(B + 'تالله' + A, 'g'), 'تَاللَّه');
+
+  t = t.replace(new RegExp(B + '(و|ف)الله' + A, 'g'), '$1اللَّاه');
+  t = t.replace(new RegExp(B + 'الله' + A, 'g'), 'اللَّاه');
+  return t;
+}
+
 function applyEgyptianPhonetics(rawText, customDict = {}) {
   if (!rawText || !rawText.trim()) return '';
   rawText = normalizeArabicInput(rawText);
@@ -1115,6 +1434,8 @@ function applyEgyptianPhonetics(rawText, customDict = {}) {
     .replace(/هَيِإْدَرْ/g, 'هيِقدر')
     .replace(/وَاللَّاهِي/g, 'والله')
     .replace(/أَصْدِي/g, 'قَصدي');
+
+  processed = applyAllahPronunciation(processed);
 
   // 1. تحويل التراكيب التي تسبب نطقاً خليجياً إلى صيغتها المصرية القاهرية الطبيعية
   processed = processed
@@ -1226,6 +1547,57 @@ function detectLineDialect(line) {
   const egyMarkers = /(إزاي|ازاي|كدا|كده|أوي|اوي|مكنش|مكانش|مفيش|عشان|علشان|بتاع|اللي|إيه|ايه|عايز|عاوز|يلا|بقى|ليه|احنا|إحنا|ده|دي|دول|دلوقتي|حاجة|فيا|جمبك|معاك|تاني|بس|أكتر|غصب|هما|هددوني|خايف|متخافش|تفتكر|تخبي|ورا|محدش|هيكتشف|كفاية|تمن|رقبتي|سدادة|مليش)/;
   return egyMarkers.test(cleanLine) ? 'egyptian' : 'msa';
 }
+
+// ---------------------------------------------------------------------------
+// V10.3: استنتاج العمر والجنس من السياق (سرد + اسم + طريقة الكلام) بدل الاعتماد على الاسم فقط
+// ---------------------------------------------------------------------------
+const AGE_CUES = {
+  child: /(طفل|طفلة|صغير|صغيرة|ولد صغير|بنت صغيرة|رضيع|تلميذ|تلميذة|بابا|ماما|يا بابا|يا ماما|عايز لعبة|في المدرسة|الحضانة)/,
+  elder: /(عجوز|شيخ|الشيخ|حاج|الحاج|الحاجة|جد|جده|الجد|الجدة|تيته|جدو|مسن|مسنة|كهل|شايب|ستيني|سبعيني|ثمانيني|شعره الأبيض|شعرها الأبيض|تجاعيد|متكئ على عكاز|عكازه|ظهره المنحني|صوته المتهدج|بصوت مرتعش|بنيي|يا ابني|يا بني|يا بنتي|يا حبيبي يا ابني|زمان كان|أيام زمان|في أيامنا)/,
+  middle: /(أب|والد|الأب|أم|الأم|والدة|رجل في الأربعين|امرأة في الأربعين|خمسيني|أربعيني|مدير|الأستاذ|أستاذ|الدكتور|دكتور|المحامي|الضابط|زوجها|زوجته|زوجي|مراتي|جوزي|عيالي|ولادي)/,
+  young: /(شاب|شابة|فتى|فتاة|مراهق|مراهقة|طالب|طالبة|جامعة|الجامعة|صديقه|صاحبي|صاحبه|يا صاحبي|يا عم|يا باشا|يا معلم|يا زميل)/
+};
+
+/** يرجع الفئة العمرية المرجّحة للمتكلم: child | young | middle | elder */
+function inferSpeakerAgeBand(speakerName = '', narrativeContext = '', spokenText = '') {
+  const nm = stripDiacritics(speakerName);
+  const nar = stripDiacritics(narrativeContext);
+  const spk = stripDiacritics(spokenText);
+
+  // السرد المباشر عن المتكلم أقوى دليل
+  const scoped = nar.includes(nm) && nm ? nar : nar;
+  if (AGE_CUES.child.test(nm) || /(الطفل|الطفلة|ولد صغير|بنت صغيرة|رضيع)/.test(scoped)) return 'child';
+  if (AGE_CUES.elder.test(nm) || AGE_CUES.elder.test(scoped)) return 'elder';
+
+  // كلام المتكلم نفسه: "يا ابني / يا بنتي / زمان" => كبير، "يا صاحبي / يا باشا" => شاب
+  if (/(يا ابني|يا بني|يا بنتي|زمان كان|أيام زمان|في سني|لما كنت في سنك|ربنا يهديك يا ابني)/.test(spk)) return 'elder';
+  if (/(بابا|ماما|يا بابا|يا ماما|عايز لعبة|مش هنام|هقول لماما)/.test(spk)) return 'child';
+
+  if (AGE_CUES.young.test(nm) || AGE_CUES.young.test(scoped) || /(يا صاحبي|يا باشا|يا معلم|يا برو|يا عم)/.test(spk)) return 'young';
+  if (AGE_CUES.middle.test(nm) || AGE_CUES.middle.test(scoped)) return 'middle';
+
+  // رقم عمر صريح: "في الستين من عمره"، "عمره 70"
+  const ageNum = (scoped.match(/(?:عمره|عمرها|في ال|في)\s*(\d{1,2})\s*(?:سنة|من عمره|من عمرها)?/) || [])[1];
+  if (ageNum) {
+    const a = parseInt(ageNum, 10);
+    if (a < 13) return 'child';
+    if (a >= 60) return 'elder';
+    if (a >= 38) return 'middle';
+    return 'young';
+  }
+  return 'middle';
+}
+
+/** يختار الصوت المناسب لجنس + عمر الشخصية، مع الحفاظ على التنوع بين الشخصيات */
+function pickVoiceForGenderAge(gender, ageBand, seed = 0) {
+  const MAP = {
+    male: { child: ['adam_child'], young: ['youssef'], middle: ['tarek', 'kareem'], elder: ['mahmoud'] },
+    female: { child: ['adam_child'], young: ['layla', 'noor'], middle: ['salma', 'noor'], elder: ['salma'] }
+  };
+  const list = (MAP[gender] || MAP.male)[ageBand] || (MAP[gender] || MAP.male).middle;
+  return list[Math.abs(seed) % list.length];
+}
+
 function inferCharacterVoice(speakerName, contextLine = '', existingRegistry = {}) {
   const cleanName = stripDiacritics(speakerName);
 
@@ -1249,7 +1621,7 @@ function inferCharacterVoice(speakerName, contextLine = '', existingRegistry = {
     };
   }
 
-  if (/(الجد|العجوز|الشيخ|الأب|الحاج|منصور|عبد الرحمن)/.test(lowerContext)) {
+  if (/(الجد|العجوز|الشيخ|الحاج|مسن|كهل|شايب|جدو)/.test(lowerContext) && !/(الجدة|الحاجة|تيته)/.test(lowerContext)) {
     return {
       name: cleanName,
       voiceId: 'mahmoud',
@@ -1260,31 +1632,38 @@ function inferCharacterVoice(speakerName, contextLine = '', existingRegistry = {
     };
   }
 
-  const femaleIndicators = /(قالت|همست|صرخت|بكت|تراجعت|ردت|المرأة|الأم|الفتاة|ليلى|ليلي|سارة|نور|سلمى|مريم|فاطمة|هند|رانيا|ملك|حبيبة|ياسمين|آية|دينا|نهى|هدى|عائشة)/;
+  const femaleIndicators = /(قالت|همست|صرخت|بكت|تراجعت|ردت|المرأة|الأم|الفتاة|ليلى|ليلي|سارة|نور|سلمى|مريم|فاطمة|هند|رانيا|ملك|حبيبة|ياسمين|آية|دينا|نهى|هدى|عائشة|الجدة|الحاجة|تيته|الست|مسنة)/;
+  const hash = cleanName.split('').reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  const ageBand = inferSpeakerAgeBand(cleanName, contextLine, '');
+
   if (femaleIndicators.test(lowerContext) || cleanName.endsWith('ة') || cleanName.endsWith('ى')) {
-    const femVoices = ['noor', 'layla', 'salma'];
-    const hash = cleanName.split('').reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+    const ageLabel = { child: 'طفلة', young: 'فتاة شابة', middle: 'امرأة ناضجة', elder: 'امرأة مسنة' }[ageBand];
     return {
       name: cleanName,
-      voiceId: femVoices[hash % femVoices.length],
-      archetype: 'امرأة / بطلة',
-      category: 'امرأة',
+      voiceId: pickVoiceForGenderAge('female', ageBand, hash),
+      archetype: ageLabel,
+      category: ageBand === 'child' ? 'طفل' : 'امرأة',
+      ageBand,
       preferredDialect: 'egyptian',
       locked: true
     };
   }
 
-  const maleVoices = ['tarek', 'youssef', 'mahmoud'];
-  const hash = cleanName.split('').reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  const ageLabelM = { child: 'طفل صغير', young: 'شاب', middle: 'رجل ناضج', elder: 'رجل مسن / حكيم' }[ageBand];
   return {
     name: cleanName,
-    voiceId: maleVoices[hash % maleVoices.length],
-    archetype: 'رجل / بطل',
-    category: 'رجل',
+    voiceId: pickVoiceForGenderAge('male', ageBand, hash),
+    archetype: ageLabelM,
+    category: ageBand === 'child' ? 'طفل' : ageBand === 'elder' ? 'رجل مسن' : 'رجل',
+    ageBand,
     preferredDialect: 'egyptian',
     locked: true
   };
 }
+
+/**
+ * استخراج الانفعال الدرامي + درجة حدة الانفعال (عادي / قوي / أقصى انفعال 🔥) من السرد بعد تجريد التشكيل لضمان عدم فشل المطابقة أبداً
+ */
 function detectEmotionFromContext(narrativeContext, dialogueText, isChild = false) {
   const combined = stripDiacritics(`${narrativeContext} ${dialogueText}`);
 
@@ -1359,6 +1738,120 @@ function detectEmotionFromContext(narrativeContext, dialogueText, isChild = fals
     actingNote: 'أداء تمثيلي مصري طبيعي وحازم يناسب سياق المشهد'
   };
 }
+
+/**
+ * المحلل الدرامي الذكي للفصول (Smart Chapter & Emotion Parser v11.0):
+ * - يجرد التشكيل أولاً عند استخراج اسم الشخصية والانفعال حتى لا تفشل المطابقة أبداً
+ * - يفصل تلقائياً بين جمل السرد الروائي (تبقى فصحى سليمة بدون تشويه) وجمل الحوار (تأخذ الضبط المصري القاهري)
+ */
+// ---------------------------------------------------------------------------
+// V10.2: تحديد المخاطَب (بيكلم مين) وضبط صيغة المذكر/المؤنث في الحوار المصري
+// ---------------------------------------------------------------------------
+const FEM_ADDRESS_CUES = /(لها|إليها|اليها|نحوها|نظر إلى ال?(?:ست|امرأة|فتاة|بنت)|سألها|ناداها|قال لها|قالها لها|التفت إلى ليلى)/;
+
+/** يحدد من هو المخاطَب: يبحث أولاً عن اسم شخصية معروفة في سطر السرد غير المتكلم نفسه، ثم عن ضمير/كلمة تدل على الجنس */
+function inferAddressee(speaker, contextLine = '', registry = {}, lastOtherSpeaker = null) {
+  const ctx = stripDiacritics(contextLine);
+  const cleanSpeaker = stripDiacritics(speaker);
+
+  // 1) اسم صريح بعد "ل/إلى/نحو/مع/على" في السرد
+  for (const key of Object.keys(registry)) {
+    const k = stripDiacritics(key);
+    if (!k || k === 'الراوي' || k === cleanSpeaker) continue;
+    const re = new RegExp('(?:^|\\s)(?:ل|إلى|الى|نحو|مع|على|ناد[ىي]|سأل|خاطب|التفت\\s+(?:إلى|الى))\\s*' + k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    if (re.test(ctx)) return registry[key];
+  }
+
+  // 2) ضمير مؤنث/مذكر بعد فعل القول
+  if (/(قال|قالت|سأل|سألت|همس|همست|صرخ|صرخت|رد|ردت)\s*(?:ل)?(?:ها)\b/.test(ctx) || FEM_ADDRESS_CUES.test(ctx)) {
+    return { category: 'امرأة', name: '؟' };
+  }
+  if (/(قال|قالت|سأل|سألت|همس|همست|صرخ|صرخت|رد|ردت)\s*(?:ل)?(?:ه)\b/.test(ctx)) {
+    return { category: 'رجل', name: '؟' };
+  }
+
+  // 3) آخر شخصية تكلمت قبل المتكلم الحالي (الحوار بيتبادل غالباً)
+  if (lastOtherSpeaker && registry[lastOtherSpeaker] && stripDiacritics(lastOtherSpeaker) !== cleanSpeaker) {
+    return registry[lastOtherSpeaker];
+  }
+  return null;
+}
+
+/** يحوّل ضمائر وأفعال المخاطَب في الحوار المصري لصيغة المؤنث أو المذكر حسب جنس المخاطَب */
+function adaptDialogueToAddressee(text, addresseeCategory) {
+  if (!text || !addresseeCategory) return text;
+  const isFem = addresseeCategory === 'امرأة';
+  const isMasc = addresseeCategory === 'رجل' || addresseeCategory === 'رجل مسن';
+  if (!isFem && !isMasc) return text;
+
+  const AR = '\u0621-\u064A';
+  const W = (w) => new RegExp('(?<![' + AR + '])' + w + '(?![' + AR + '])', 'g');
+  let out = text;
+
+  if (isFem) {
+    out = out
+      .replace(W('إنتَ|انت|إنت|أنت'), 'إنتِ')
+      .replace(W('عليك'), 'عليكي')
+      .replace(W('معاك'), 'معاكي')
+      .replace(W('عندك'), 'عندِك')
+      .replace(W('ليك'), 'ليكي')
+      .replace(W('منك'), 'منِّك')
+      .replace(W('بتعمل'), 'بتعملي')
+      .replace(W('بتقول'), 'بتقولي')
+      .replace(W('بتروح'), 'بتروحي')
+      .replace(W('بتحب'), 'بتحبي')
+      .replace(W('بتفكر'), 'بتفكري')
+      .replace(W('عايز'), 'عايزة')
+      .replace(W('عاوز'), 'عاوزة')
+      .replace(W('فاهم'), 'فاهمة')
+      .replace(W('مصدقني'), 'مصدقاني')
+      .replace(W('متقولش'), 'متقوليش')
+      .replace(W('متخافش'), 'متخافيش')
+      .replace(W('متزعلش'), 'متزعليش')
+      .replace(W('خليك'), 'خليكي')
+      .replace(W('اسمع'), 'اسمعي')
+      .replace(W('بص'), 'بُصّي')
+      .replace(W('شوف'), 'شوفي')
+      .replace(W('تعالى'), 'تعالي')
+      .replace(W('استنى'), 'استني');
+  } else {
+    out = out
+      .replace(W('إنتِ|انتي|إنتي|أنتِ'), 'إنتَ')
+      .replace(W('عليكي'), 'عليك')
+      .replace(W('معاكي'), 'معاك')
+      .replace(W('ليكي'), 'ليك')
+      .replace(W('بتعملي'), 'بتعمل')
+      .replace(W('بتقولي'), 'بتقول')
+      .replace(W('بتروحي'), 'بتروح')
+      .replace(W('عايزة'), 'عايز')
+      .replace(W('عاوزة'), 'عاوز')
+      .replace(W('فاهمة'), 'فاهم')
+      .replace(W('متقوليش'), 'متقولش')
+      .replace(W('متخافيش'), 'متخافش')
+      .replace(W('خليكي'), 'خليك')
+      .replace(W('اسمعي'), 'اسمع')
+      .replace(W('شوفي'), 'شوف');
+  }
+  return out;
+}
+
+/** لو الشخصية جديدة (مش مقفولة يدوياً) نحسّن اختيار صوتها من طريقة كلامها نفسه، ولا نغيّر صوت شخصية المستخدم قفلها */
+function refineProfileBySpeech(profile, speaker, narrative, spokenText, registry) {
+  if (!profile || profile.userLocked) return profile;
+  const known = Object.keys(registry).some((k) => stripDiacritics(k) === stripDiacritics(speaker));
+  if (known) return profile; // الشخصية متسجلة قبل كده: نحافظ على ثبات صوتها طول الفصل
+  const band = inferSpeakerAgeBand(speaker, narrative, spokenText);
+  if (band === profile.ageBand) return profile;
+  const isFemale = profile.category === 'امرأة' || /امرأة|فتاة|طفلة/.test(profile.archetype || '');
+  const hash = stripDiacritics(speaker).split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+  return {
+    ...profile,
+    ageBand: band,
+    voiceId: pickVoiceForGenderAge(isFemale ? 'female' : 'male', band, hash),
+    category: band === 'child' ? 'طفل' : isFemale ? 'امرأة' : band === 'elder' ? 'رجل مسن' : 'رجل'
+  };
+}
+
 function parseNovelChapterLocally(
   chapterText,
   currentRegistry,
@@ -1374,6 +1867,7 @@ function parseNovelChapterLocally(
   const updatedRegistry = { ...currentRegistry };
   let lastNarrativeLine = '';
   let lastHintedSpeaker = null;
+  let prevDialogueSpeaker = null;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -1406,7 +1900,8 @@ function parseNovelChapterLocally(
         }
       }
 
-      const charProfile = inferCharacterVoice(speaker, cleanLastNarrative, updatedRegistry);
+      let charProfile = inferCharacterVoice(speaker, cleanLastNarrative, updatedRegistry);
+      charProfile = refineProfileBySpeech(charProfile, speaker, cleanLastNarrative, spokenText, updatedRegistry);
       updatedRegistry[speaker] = charProfile;
 
       const isChild = charProfile.voiceId === 'adam_child' || /طفل/.test(charProfile.archetype);
@@ -1418,13 +1913,19 @@ function parseNovelChapterLocally(
 
       const lineDialect = detectLineDialect(spokenText);
 
+      const addressee = inferAddressee(speaker, cleanLastNarrative, updatedRegistry, prevDialogueSpeaker);
+      const adaptedText =
+        lineDialect === 'egyptian' ? adaptDialogueToAddressee(spokenText, addressee?.category) : spokenText;
       const phoneticText =
-        lineDialect === 'egyptian' ? applyEgyptianPhonetics(spokenText, customDict) : spokenText;
+        lineDialect === 'egyptian' ? applyEgyptianPhonetics(adaptedText, customDict) : spokenText;
+      prevDialogueSpeaker = speaker;
 
       segments.push({
         id: 'seg-' + i,
         type: 'dialogue',
         speaker,
+        addressee: addressee?.name || null,
+        addresseeCategory: addressee?.category || null,
         text: spokenText,
         phoneticText,
         dialect: lineDialect,
@@ -1443,9 +1944,16 @@ function parseNovelChapterLocally(
       const bracketEmotion = colonDialogueMatch[2] || '';
       const spokenText = colonDialogueMatch[3].trim();
 
-      const charProfile = inferCharacterVoice(
+      let charProfile = inferCharacterVoice(
         speaker,
         bracketEmotion + ' ' + lastNarrativeLine,
+        updatedRegistry
+      );
+      charProfile = refineProfileBySpeech(
+        charProfile,
+        speaker,
+        bracketEmotion + ' ' + lastNarrativeLine,
+        spokenText,
         updatedRegistry
       );
       updatedRegistry[speaker] = charProfile;
@@ -1458,13 +1966,24 @@ function parseNovelChapterLocally(
       );
 
       const lineDialect = detectLineDialect(spokenText);
+      const addressee = inferAddressee(
+        speaker,
+        bracketEmotion + ' ' + lastNarrativeLine,
+        updatedRegistry,
+        prevDialogueSpeaker
+      );
+      const adaptedText =
+        lineDialect === 'egyptian' ? adaptDialogueToAddressee(spokenText, addressee?.category) : spokenText;
       const phoneticText =
-        lineDialect === 'egyptian' ? applyEgyptianPhonetics(spokenText, customDict) : spokenText;
+        lineDialect === 'egyptian' ? applyEgyptianPhonetics(adaptedText, customDict) : spokenText;
+      prevDialogueSpeaker = speaker;
 
       segments.push({
         id: 'seg-' + i,
         type: 'dialogue',
         speaker,
+        addressee: addressee?.name || null,
+        addresseeCategory: addressee?.category || null,
         text: spokenText,
         phoneticText,
         dialect: lineDialect,
@@ -1519,7 +2038,6 @@ function parseNovelChapterLocally(
 
   return { segments, updatedRegistry };
 }
-
 function rdSplitQuotes(text) { // حوار جوه الفقرة «..» أو “..” بيتفصل لسطر حوار لوحده (زي ما الأداة بتقرا الشرطة)
   const out = [];
   for (const raw of String(text).split('\n')) {
@@ -1970,6 +2488,47 @@ async function alertsTick(env) { // من الـ Cron: لما يحين ميعاد
   await env.DB.prepare('DELETE FROM ch_alerts WHERE sent=1 AND rel<?').bind(now - 30 * 86400000).run();
 }
 
+
+/* ---------- إشعارات تلقائية: ميزة اليوم الساعة 1 الضهر + رسالة الغياب (يومين / أسبوع) ---------- */
+const ENG_TIPS = [
+  ['📖 اقرأ براحتك', 'غيّر لون الخلفية وحجم الخط ومسافة السطور من شريط القراءة، واقرأ بالشكل اللي يريّح عينك.'],
+  ['🎧 استمع للفصول', 'اضغط «استمع للفصل» وشغّل الرواية بصوت مصري، وقدّم أو أخّر ١٠ ثواني، وغيّر السرعة ×١.٢٥ و×١.٥ و×٢.'],
+  ['🔖 مكتبتك ومفضلتك', 'ضيف رواياتك المفضلة لمكتبتك، وكمّل من آخر فصل وقفت عنده في أي وقت.'],
+  ['🔔 نبهني بالفصل الجديد', 'اضغط «نبهني» على أي فصل مجدول، وهيجيلك إشعار أول ما ينزل.'],
+  ['💬 شارك رأيك واكسب نقاط', 'علّق وقيّم الفصول، وكل تعليق وتقييم بيزوّد نقاط محفظتك.'],
+  ['🏆 المسابقة الأسبوعية', 'جاوب أسئلة المسابقة الأسبوعية، وفرصتك تكسب جوايز كل أسبوع.'],
+  ['✍️ تابع كتّابك المفضلين', 'تابع الكاتب اللي بتحبه، وهتعرف فورًا لما ينزّل فصل أو رواية جديدة.'],
+  ['📄 حمّل الرواية PDF', 'تقدر تحمّل الروايات الورقية PDF وتقراها في أي وقت.']
+];
+const ENG_DEF = { tip: true, hour: 13, gone: true, d1: 2, d2: 7, t1: 'أنت غايب بقالك يومين 🌿', x1: 'يارب تكون بخير، افتح التطبيق وطمنا عليك', t2: 'أنت غايب بقالك أسبوع 🌿', x2: 'يارب تكون بخير، افتح التطبيق وطمنا عليك', tips: [] };
+function normEng(x) {
+  x = x && typeof x === 'object' ? x : {}; const n = (v, d, a, z) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(z, Math.round(v))) : d; }, s = (v, d, m) => { v = String(v == null ? '' : v).trim().slice(0, m); return v || d; };
+  const tips = Array.isArray(x.tips) ? x.tips.slice(0, 40).map((q) => ({ t: s(q && q.t, '', 60), x: s(q && q.x, '', 220) })).filter((q) => q.t && q.x) : [];
+  return { tip: x.tip !== false, hour: n(x.hour, 13, 0, 23), gone: x.gone !== false, d1: n(x.d1, 2, 1, 30), d2: n(x.d2, 7, 2, 60), t1: s(x.t1, ENG_DEF.t1, 60), x1: s(x.x1, ENG_DEF.x1, 220), t2: s(x.t2, ENG_DEF.t2, 60), x2: s(x.x2, ENG_DEF.x2, 220), tips };
+}
+const cairoHour = () => { try { return +new Intl.DateTimeFormat('en-GB', { timeZone: 'Africa/Cairo', hour: '2-digit', hour12: false }).format(new Date()) % 24; } catch (e) { return (new Date().getUTCHours() + 2) % 24; } };
+async function engageTick(env) {
+  const now = Date.now(), cf = normEng(await getSetting(env, 'engage')), st = await getSetting(env, 'engage_st');
+  if (now - (st.run || 0) < 4 * 60000) return; // مرة كل ~5 دقايق كفاية
+  const hr = cairoHour(), day = cairoDay(); let dirty = { ...st, run: now };
+  if (cf.tip && hr >= cf.hour && hr < cf.hour + 6 && st.day !== day) {
+    dirty.day = day; await setSetting(env, 'engage_st', dirty);
+    const pool = cf.tips.length ? cf.tips.map((q) => [q.t, q.x]) : ENG_TIPS, tp = pool[(st.i || 0) % pool.length]; dirty.i = ((st.i || 0) + 1) % pool.length;
+    try { await env.DB.prepare('INSERT INTO bcast (title,text,url,ts) VALUES (?,?,?,?)').bind(tp[0], tp[1], '', now).run(); await env.DB.prepare('DELETE FROM bcast WHERE id NOT IN (SELECT id FROM bcast ORDER BY ts DESC LIMIT 60)').run(); } catch (e) {}
+    if (env.FCM_SA) { try { await sendPush(env, tp[0], tp[1], '', 'all'); } catch (e) {} }
+  }
+  if (cf.gone && env.FCM_SA && hr >= 10 && hr < 22) {
+    const lim1 = now - cf.d1 * DAYMS, { results } = await env.DB.prepare('SELECT u.id AS id, s.m AS m, g.lvl AS lvl, g.seen AS gs FROM users u JOIN (SELECT uid, MAX(seen) AS m FROM sessions GROUP BY uid) s ON s.uid=u.id LEFT JOIN gone_sent g ON g.uid=u.id WHERE s.m>0 AND s.m<? LIMIT 120').bind(lim1).all();
+    for (const r of results) {
+      const lvl = now - r.m >= cf.d2 * DAYMS ? 2 : 1;
+      if (r.gs === r.m && (r.lvl || 0) >= lvl) continue;
+      await env.DB.prepare('INSERT INTO gone_sent (uid,lvl,seen,ts) VALUES (?,?,?,?) ON CONFLICT(uid) DO UPDATE SET lvl=excluded.lvl,seen=excluded.seen,ts=excluded.ts').bind(r.id, lvl, r.m, now).run();
+      try { await sendPush(env, lvl === 2 ? cf.t2 : cf.t1, lvl === 2 ? cf.x2 : cf.x1, '', 'u_' + r.id); } catch (e) {}
+    }
+  }
+  await setSetting(env, 'engage_st', dirty);
+}
+
 /* ---------- المسابقة الأسبوعية + نقاط الكتّاب + قرعة نقاط الفوز ---------- */
 const DAYMS = 86400000, PT_PER_VOTE = 0.1;
 const cairoDay = () => new Date(Date.now() + 2 * 3600000).toISOString().slice(0, 10);
@@ -2074,7 +2633,7 @@ export default {
   },
   // كل دقيقة: يكمّل تحويل الفصول في الطابور (بحد يومي)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { try { await ensureSchema(env); env = await withKeys(env); try { await ptsTick(env); } catch (e) {} try { await alertsTick(env); } catch (e) {} try { await releasesTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM notes WHERE ts<?').bind(Date.now() - 30 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM visits WHERE day<?').bind(dayKey(Date.now() - 45 * 86400000)).run(); await env.DB.prepare('DELETE FROM presence WHERE seen<?').bind(Date.now() - 2 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) { try { await ttsRebalance(env); } catch (e) {} await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } } catch (e) {} })());
+    ctx.waitUntil((async () => { try { await ensureSchema(env); env = await withKeys(env); try { await ptsTick(env); } catch (e) {} try { await alertsTick(env); } catch (e) {} try { await engageTick(env); } catch (e) {} try { await releasesTick(env); } catch (e) {} try { await env.DB.prepare('DELETE FROM sessions WHERE seen<?').bind(Date.now() - 40 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM notes WHERE ts<?').bind(Date.now() - 30 * 86400000).run(); } catch (e) {} try { await env.DB.prepare('DELETE FROM visits WHERE day<?').bind(dayKey(Date.now() - 45 * 86400000)).run(); await env.DB.prepare('DELETE FROM presence WHERE seen<?').bind(Date.now() - 2 * 86400000).run(); } catch (e) {} if (await ttsMigrate(env)) { try { await ttsRebalance(env); } catch (e) {} await Promise.all(PROVS.map((p) => ttsStep(env, { prov: p }).catch(() => {}))); } } catch (e) {} })());
   }
 };
 
@@ -3056,6 +3615,8 @@ async function route(request, env) {
       return json({ ok: true, id: r.meta.last_row_id });
     }
     if ((g = /^\/api\/admin\/news\/(\d+)\/delete$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM news WHERE id=?').bind(+g[1]).run(); return json({ ok: true }); }
+    if (path === '/api/admin/engage' && m === 'GET') return json({ conf: normEng(await getSetting(env, 'engage')), tips: ENG_TIPS });
+    if (path === '/api/admin/engage' && m === 'PUT') { const b = await body(request); const c = normEng(b); await setSetting(env, 'engage', c); return json({ conf: c }); }
     if ((g = /^\/api\/admin\/bcast\/(\d+)\/delete$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM bcast WHERE id=?').bind(+g[1]).run(); return json({ ok: true }); }
     if (path === '/api/admin/notes/clear' && m === 'POST') {
       const b = await body(request, 500).catch(() => ({})), days = Math.max(0, Math.min(3650, parseInt(b.days, 10) || 0));
