@@ -2653,7 +2653,7 @@ async function fansOf(env, author) {
 }
 async function goldConf(env) { const c = await getSetting(env, 'gold'); const n = (v, d, a, z) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(z, v)) : d; }; return { rate: n(c.rate, 10, 0.01, 100000), min: n(c.min, 50, 0, 1000000) }; }
 const egpOf = (pts, rate) => Math.floor((pts / rate) * 100 + 1e-9) / 100;
-async function streakConf(env) { const c = await getSetting(env, 'streak'); const n = (v, d, a, z) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(z, v)) : d; }; return { on: c.on !== false, days: Math.round(n(c.days, 7, 2, 60)), pts: 2 }; }
+async function streakConf(env) { const c = await getSetting(env, 'streak'); const n = (v, d, a, z) => { v = Number(v); return Number.isFinite(v) ? Math.max(a, Math.min(z, v)) : d; }; return { on: c.on !== false, days: Math.round(n(c.days, 7, 2, 60)), pts: n(c.pts, 2, 0, 1000) }; }
 async function streakCheckin(env, uid) {
   const sc = await streakConf(env), today = cairoDay(), yest = new Date(Date.parse(today + 'T00:00:00Z') - DAYMS).toISOString().slice(0, 10);
   const r = await env.DB.prepare('SELECT last,cur,awards FROM streaks WHERE uid=?').bind(uid).first();
@@ -2665,7 +2665,7 @@ async function streakCheckin(env, uid) {
   if (r) { const u = await env.DB.prepare('UPDATE streaks SET last=?,cur=?,awards=? WHERE uid=? AND last<>?').bind(today, cur, awards, uid, today).run(); ok = !!(u && u.meta && u.meta.changes); }
   else { const u = await env.DB.prepare('INSERT OR IGNORE INTO streaks (uid,last,cur,awards) VALUES (?,?,?,?)').bind(uid, today, cur, awards).run(); ok = !!(u && u.meta && u.meta.changes); }
   if (!ok) return { on: true, cur: r ? r.cur : 0, days: sc.days, pts: sc.pts, awarded: 0, today: true };
-  if (awarded > 0) await env.DB.prepare('UPDATE users SET wallet=ROUND(wallet+?,1) WHERE id=?').bind(awarded, uid).run();
+  if (awarded > 0) await env.DB.prepare('UPDATE users SET wallet=ROUND(wallet+?,2) WHERE id=?').bind(awarded, uid).run();
   return { on: true, cur, shown, days: sc.days, pts: sc.pts, awarded, awards, today: false };
 }
 
@@ -2739,15 +2739,18 @@ async function cmtConf(env) { const c = await getSetting(env, 'cmt'); const n = 
 const normTxt = (t) => String(t).toLowerCase().replace(/[\u064B-\u065F\u0670\u0640]/g, '').replace(/[أإآ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
 const jacc = (a, b) => { const x = new Set(a.split(' ')), y = new Set(b.split(' ')); let i = 0; x.forEach((w) => { if (y.has(w)) i++; }); const u = x.size + y.size - i; return u ? i / u : 0; };
 const fnv = (t) => { let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); };
+async function walConf(env) { const c = await getSetting(env, 'walcfg'), n = (v, d, a, z) => { v = Number(v); return Number.isFinite(v) && v !== null ? Math.max(a, Math.min(z, v)) : d; }; return { vote: n(c.vote, 0.1, 0, 1000), comment: n(c.comment, 0.1, 0, 1000), perDay: Math.round(n(c.perDay, 3, 0, 500)), premMult: n(c.premMult, 2, 1, 20) }; }
 const WAL_PT = 0.1, WAL_DAY = 3; // كل تقييم/تعليق = 0.1 نقطة، وبحد أقصى 3 مرات في اليوم (تعليق + تصويت مع بعض)
-async function walMult(env, uid) { const u = await env.DB.prepare('SELECT role,premium_until FROM users WHERE id=?').bind(uid).first(); return isPremium(u) ? 2 : 1; }
+async function walMult(env, uid) { const u = await env.DB.prepare('SELECT role,premium_until FROM users WHERE id=?').bind(uid).first(); return isPremium(u) ? (await walConf(env)).premMult : 1; }
 async function walAward(env, uid, kind, ref) { // مصدر النقاط الوحيد للقارئ: vote / comment (+ streak لوحده)
   const day = cairoDay();
   const got = await env.DB.prepare("SELECT COUNT(*) AS n FROM wal_log WHERE uid=? AND day=? AND kind IN ('vote','comment')").bind(uid, day).first();
-  if ((got && got.n) >= WAL_DAY) return 0;
-  const amt = Math.round(WAL_PT * (await walMult(env, uid)) * 10) / 10;
+  const wc = await walConf(env);
+  if ((got && got.n) >= wc.perDay) return 0;
+  const amt = Math.round((kind === 'vote' ? wc.vote : wc.comment) * (await walMult(env, uid)) * 100) / 100;
+  if (!(amt > 0)) return 0;
   const r = await env.DB.prepare('INSERT OR IGNORE INTO wal_log (uid,day,kind,ref,amt,ts) VALUES (?,?,?,?,?,?)').bind(uid, day, kind, String(ref), amt, Date.now()).run();
-  if (r && r.meta && r.meta.changes) { await env.DB.prepare('UPDATE users SET wallet=ROUND(wallet+?,1) WHERE id=?').bind(amt, uid).run(); return amt; }
+  if (r && r.meta && r.meta.changes) { await env.DB.prepare('UPDATE users SET wallet=ROUND(wallet+?,2) WHERE id=?').bind(amt, uid).run(); return amt; }
   return 0;
 }
 async function awardCmt(env, uid, logId) {
@@ -3665,6 +3668,8 @@ async function route(request, env) {
       const { results: draws } = await env.DB.prepare('SELECT week,user_id,name,points,prize,ts FROM pts_draws ORDER BY week DESC LIMIT 12').all();
       return json({ prize: pts.prize || 0, start: pts.start || '', week: weekStart(), nextDraw: weekEndMs(weekStart()), top, draws });
     }
+    if (path === '/api/admin/wallet' && m === 'GET') return json({ ...(await walConf(env)), streak: await streakConf(env) });
+    if (path === '/api/admin/wallet' && m === 'PUT') { const b = await body(request, 400), cur = await walConf(env); await setSetting(env, 'walcfg', { vote: b.vote ?? cur.vote, comment: b.comment ?? cur.comment, perDay: b.perDay ?? cur.perDay, premMult: b.premMult ?? cur.premMult }); return json({ ...(await walConf(env)), streak: await streakConf(env) }); }
     if (path === '/api/admin/gold' && m === 'GET') return json(await goldConf(env));
     if (path === '/api/admin/gold' && m === 'PUT') { const b = await body(request, 300), cur = await goldConf(env); await setSetting(env, 'gold', { rate: b.rate == null ? cur.rate : b.rate, min: b.min == null ? cur.min : b.min }); return json(await goldConf(env)); }
     if (path === '/api/admin/withdrawals' && m === 'GET') {
