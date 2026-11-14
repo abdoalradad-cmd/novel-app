@@ -2587,10 +2587,10 @@ async function ttsDoneNotify(env, ch) { // فصل اتحوّل لصوت: إشع�
   let au = null;
   if (/^u\d+$/.test(ch.nid)) au = await env.DB.prepare('SELECT u.id,u.name,u.role FROM novels n JOIN users u ON u.id=n.user_id WHERE n.id=?').bind(+ch.nid.slice(1)).first();
   else { const { results } = await env.DB.prepare('SELECT n.l_extra,n.d_extra,u.id,u.name,u.role FROM novels n JOIN users u ON u.id=n.user_id WHERE n.l_extra LIKE ? OR n.d_extra LIKE ?').bind('%' + ch.nid + '%', '%' + ch.nid + '%').all(); au = results.find((x) => extraOf(x.l_extra).siteId === ch.nid || extraOf(x.d_extra).siteId === ch.nid) || null; }
-  if (!au || au.role === 'admin') return;
+  const cn = ch.ctitle || 'فصل ' + (ch.idx + 1), nt = ch.ntitle || 'روايتك';
+  if (!au) { await notifyAdmins(env, '', 'الفصل اتحوّل لصوت 🎧', '«' + nt + '» — ' + cn + ' بقى ينفع تسمعه دلوقتي.', 'tts' + ch.nid + '#' + ch.idx); return; }
   const ref = 'tts' + ch.nid + '#' + ch.idx;
   if (await env.DB.prepare('SELECT 1 AS x FROM notes WHERE uid=? AND novel_ref=?').bind(au.id, ref).first()) return;
-  const cn = ch.ctitle || 'فصل ' + (ch.idx + 1), nt = ch.ntitle || 'روايتك';
   await notifyUser(env, au.id, 'الفصل اتحوّل لصوت 🎧', '«' + nt + '» — ' + cn + ' بقى ينفع تسمعه دلوقتي.', ref);
   if (cf.followers && env.FCM_SA) await sendPush(env, '🎧 فصل جديد بالصوت من ' + au.name, '«' + nt + '» — ' + cn + ' بقى متاح للاستماع.', '', 'a_' + au.id);
 }
