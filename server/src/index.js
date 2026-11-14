@@ -2324,6 +2324,29 @@ async function rdLearn(env, text, conf) {
     await setSetting(env, 'rd_learned', merged); RD_LEARN = merged; return n;
   } catch (e) { return 0; }
 }
+
+// تعليم الأداة من تسجيل صوتي مصري: Gemini يسمع التسجيل ويطلّع تشكيل النطق الصحيح، ويتحفظ في القاموس الدائم
+async function rdLearnMerge(env, clean, src) {
+  const n = Object.keys(clean).length; if (!n) return 0;
+  let cur = {}; try { cur = (await getSetting(env, 'rd_learned')) || {}; } catch (e) {}
+  const merged = { ...cur, ...clean }, keys = Object.keys(merged); if (keys.length > 6000) keys.slice(0, keys.length - 6000).forEach((k) => delete merged[k]);
+  await setSetting(env, 'rd_learned', merged); RD_LEARN = merged;
+  try { const lg = (await getSetting(env, 'rd_learn_log')) || {}; const arr = (lg.items || []).slice(0, 49); arr.unshift({ at: Date.now(), n, src, w: Object.keys(clean).slice(0, 8) }); await setSetting(env, 'rd_learn_log', { items: arr }); } catch (e) {}
+  return n;
+}
+async function rdLearnAudio(env, b64, mime, word, hint) {
+  const one = (word || '').trim();
+  const prompt = one
+    ? 'استمع للتسجيل. المتحدث مصري وبينطق الكلمة «' + one + '». شكّل الكلمة بالحركات بنفس النطق المصري اللي سمعته بالظبط. أرجع JSON object فقط: {"' + one + '": "الكلمة مشكّلة"}. لا تغيّر أي حرف.'
+    : 'أنت خبير نطق في العامية المصرية. استمع للتسجيل (كلام مصري' + (hint ? '، والنص المكتوب التقريبي: ' + hint.slice(0, 600) : '') + ') وفرّغه بالعامية المصرية. ثم أرجع JSON object فقط: المفتاح الكلمة بدون تشكيل كما تُكتب، والقيمة نفس الكلمة بنفس الحروف تماماً مع الحركات بحسب نطقها المصري في التسجيل. أدرج فقط الكلمات التي ينطقها المصريون بشكل مختلف عن الفصحى أو التي قد يخطئ فيها قارئ آلي (أسماء، عامية، ضمائر). حد أقصى 150 كلمة، ولا تغيّر أي حرف.';
+  const r = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent', { method: 'POST', signal: AbortSignal.timeout(90000), headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ inlineData: { mimeType: mime, data: b64 } }, { text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } }) });
+  if (!r.ok) throw new Error('تعذّر تحليل الصوت (' + r.status + ')');
+  const j = await r.json(), txt = (((j.candidates || [])[0] || {}).content || {}).parts; if (!txt) throw new Error('مفيش رد من Gemini');
+  let obj = {}; try { obj = JSON.parse(txt.map((x) => x.text || '').join('')); } catch (e) { throw new Error('رد غير مفهوم'); }
+  const clean = {};
+  for (const [k, v] of Object.entries(obj)) { const key = stripDiacritics(String(k)).trim(); if (typeof v === 'string' && key && !/\s/.test(key) && stripDiacritics(v) === key && v !== key && v.length <= key.length * 2 + 4) clean[key] = v; }
+  return clean;
+}
 // جنس الراوي لكل رواية: m = كريم، f = سلمى (بيتحفظ للرواية كلها)
 async function rdNarrator(env, nid, cf) {
   let g = ''; try { g = ((await getSetting(env, 'rdnar_' + (nid || 'x'))) || {}).g || ''; } catch (e) {}
@@ -3870,6 +3893,18 @@ async function route(request, env) {
       return json({ ok: true, id: r.meta.last_row_id });
     }
     if ((g = /^\/api\/admin\/news\/(\d+)\/delete$/.exec(path)) && m === 'POST') { await env.DB.prepare('DELETE FROM news WHERE id=?').bind(+g[1]).run(); return json({ ok: true }); }
+    if (path === '/api/admin/rd/learn-audio' && m === 'POST') { // رفع ملف صوتي أو تسجيل → تعلّم نطق
+      const b = await body(request, 6500000); const mime = /^audio\/[\w.+-]+$/.test(String(b.mime || '').split(';')[0]) ? String(b.mime).split(';')[0] : '';
+      if (!mime || !b.audio || String(b.audio).length < 500) return fail('الملف الصوتي غير صالح', 400);
+      const e2 = gemEnv(env, 'gemini'); let clean;
+      try { clean = await rdLearnAudio(e2, String(b.audio), mime, String(b.word || '').slice(0, 40), String(b.text || '')); } catch (e) { return fail(String(e.message || e).slice(0, 160), 502); }
+      const n = await rdLearnMerge(env, clean, b.word ? 'record' : 'audio');
+      if (env.TTS_BUCKET && n) { try { await env.TTS_BUCKET.put('learn/' + Date.now() + '.' + mime.split('/')[1].replace(/[^a-z0-9]/g, ''), Uint8Array.from(atob(String(b.audio)), (c) => c.charCodeAt(0)), { httpMetadata: { contentType: mime } }); } catch (e) {} }
+      return json({ n, words: clean });
+    }
+    if (path === '/api/admin/rd/learn-word' && m === 'POST') { const b = await body(request, 2000); const key = stripDiacritics(String(b.word || '')).trim(), v = String(b.pron || '').trim(); if (!key || /\s/.test(key) || stripDiacritics(v) !== key) return fail('التشكيل لازم يكون على نفس حروف الكلمة', 400); await rdLearnMerge(env, { [key]: v }, 'manual'); return json({ ok: true }); }
+    if (path === '/api/admin/rd/learned' && m === 'GET') { const d = (await getSetting(env, 'rd_learned')) || {}, lg = (await getSetting(env, 'rd_learn_log')) || {}; const k = Object.keys(d); return json({ total: k.length, words: k.slice(-60).reverse().map((w) => [w, d[w]]), log: lg.items || [], stat: await getSetting(env, 'rd_learn_stat') }); }
+    if (path === '/api/admin/rd/learned' && m === 'DELETE') { const b = await body(request, 2000); const d = (await getSetting(env, 'rd_learned')) || {}; delete d[String(b.word || '')]; await setSetting(env, 'rd_learned', d); RD_LEARN = d; return json({ ok: true }); }
     if (path === '/api/admin/pubflow' && m === 'GET') return json({ conf: normPub(await getSetting(env, 'pubflow')), learn: await getSetting(env, 'rd_learn_stat') });
     if (path === '/api/admin/pubflow' && m === 'PUT') { const b = await body(request); const c = normPub(b); await setSetting(env, 'pubflow', c); return json({ conf: c }); }
     if ((g = /^\/api\/admin\/novels\/(\d+)\/narrator$/.exec(path))) { // جنس الراوي للرواية كلها: m = كريم، f = سلمى
