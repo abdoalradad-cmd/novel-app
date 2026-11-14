@@ -792,7 +792,6 @@ const EGYPTIAN_PHONETIC_LEXICON = {
   'انت': 'إنت',
   'أنتي': 'إنتي',
   'انتي': 'إنتي',
-  'أنتم': 'إنتو',
   'انتو': 'إنتو',
   'إحنا': 'إحنا',
   'احنا': 'إحنا',
@@ -1155,7 +1154,6 @@ const EGYPTIAN_PHONETIC_LEXICON = {
   'كله': 'كُلُّه',
   'كلها': 'كُلُّهَا',
   'كلنا': 'كُلِّنَا',
-  'كلكم': 'كُلُّكُم',
   'بعضنا': 'بَعْضِينَا',
   'بقا': 'بَقَى',
   'ينفع': 'يِنْفَع',
@@ -1337,7 +1335,6 @@ const EGYPTIAN_PHONETIC_LEXICON = {
   'وداعا': 'وَدَاعًا',
   'وحشتني': 'وَحَشْتِنِي',
   'وحشتيني': 'وَحَشْتِينِي',
-  'وحشتوني': 'وَحَشْتُونِي',
   'اتأخرت': 'اِتْأَخَّرْت',
   'اتأخر': 'اِتْأَخَّر',
   'اتاخرت': 'اِتْأَخَّرْت',
@@ -1432,6 +1429,44 @@ const EGYPTIAN_PHONETIC_LEXICON = {
   'المملة': 'المُمِلَّة',
   'مملين': 'مُمِلِّين',
   'الممله': 'المُمِلَّة',
+
+  // === V10.5: أسماء وكلمات بتتنطق غلط (ح→خ، كم→كن، لجنة...) ===
+  'مت': 'مُتْ',
+  'لجنة': 'لَجْنَة',
+  'لجنه': 'لَجْنَة',
+  'اللجنة': 'اللَّجْنَة',
+  'اللجنه': 'اللَّجْنَة',
+  'لجنتي': 'لَجْنِتِي',
+  'أحمد': 'أَحْمَد',
+  'احمد': 'أَحْمَد',
+  'محمد': 'مُحَمَّد',
+  'محمود': 'مَحْمُود',
+  'حمدي': 'حَمْدِي',
+  'حسن': 'حَسَن',
+  'حسين': 'حُسَيْن',
+  'حسام': 'حُسَام',
+  'حازم': 'حَازِم',
+  'حامد': 'حَامِد',
+  'حمزة': 'حَمْزَة',
+  'أحمدي': 'أَحْمَدِي',
+  'فيكم': 'فِيكُمْ',
+  'عجبتكم': 'عَجَبْتُكُمْ',
+  'عليكم': 'عَلَيْكُمْ',
+  'معاكم': 'مَعَاكُمْ',
+  'منكم': 'مِنْكُمْ',
+  'ليكم': 'لِيكُمْ',
+  'عندكم': 'عِنْدِكُمْ',
+  'معكم': 'مَعَكُمْ',
+  'بيكم': 'بِيكُمْ',
+  'وراكم': 'وَرَاكُمْ',
+  'حبيتكم': 'حَبِّيتَكُمْ',
+  'شفتكم': 'شُفْتِكُمْ',
+  'سمعتكم': 'سِمِعْتِكُمْ',
+  'عرفتكم': 'عِرِفْتِكُمْ',
+  'وحشتوني': 'وَحَشْتُونِي',
+  'كلكم': 'كُلُّكُمْ',
+  'انتم': 'إِنْتُمْ',
+  'أنتم': 'إِنْتُمْ',
 };
 
 /**
@@ -1444,6 +1479,14 @@ const EGYPTIAN_PHONETIC_LEXICON = {
 // V10.3: لفظ الجلالة بالنطق المصري (تفخيم بعد الفتح والضم، ترقيق بعد الكسر)
 // ---------------------------------------------------------------------------
 // V10.4: كلمات متشابهة الرسم مختلفة المعنى والنطق - تُحسم من السياق
+// V10.5: ضمير الجمع "كم" ينطق أحياناً "كن": نثبّته بضمة وسكون
+function applyPluralSuffixFix(text) {
+  if (!text) return text;
+  const AR = '\u0621-\u064A';
+  const stems = 'عجبت|حبيت|شفت|سمعت|عرفت|قابلت|كلمت|وحشت|شكرت|سامحت|قلت|جيت|سألت|فهمت|نسيت|ساعدت|في|ل|من|علي|على|مع|معا|عند|عن|ورا|قدام|جنب|بين|لي|بي|ال';
+  return text.replace(new RegExp('(?<![' + AR + '])(' + stems + ')كم(?![' + AR + '])', 'g'), '$1كُمْ');
+}
+
 function applyHomographRules(text) {
   if (!text) return text;
   const AR = '\u0621-\u064A';
@@ -1470,6 +1513,7 @@ function applyHomographRules(text) {
 
 function applyAllahPronunciation(text) {
   if (!text) return text;
+  text = text.replace(/ا[\u064B-\u0652\u0670]*ل[\u064B-\u0652\u0670]*ل[\u064B-\u0652\u0670]*ه[\u064B-\u0652\u0670]*(?![\u0621-\u064A])/g, 'الله');
   const AR = '\u0621-\u064A';
   const B = '(?<![' + AR + '])';
   const A = '(?![' + AR + '])';
@@ -1499,6 +1543,8 @@ function applyAllahPronunciation(text) {
 
   t = t.replace(new RegExp(B + '(و|ف)الله' + A, 'g'), '$1اللَّاه');
   t = t.replace(new RegExp(B + 'الله' + A, 'g'), 'اللَّاه');
+  // المصريون لا ينطقون حركة إعراب في آخر لفظ الجلالة: نثبّت الهاء بسكون
+  t = t.replace(/(اللَّا?ه|لِلَّا?ه)(?![\u0621-\u064A\u064B-\u0652])/g, '$1ْ');
   return t;
 }
 
@@ -1519,6 +1565,7 @@ function applyEgyptianPhonetics(rawText, customDict = {}) {
     .replace(/وَاللَّاهِي/g, 'والله')
     .replace(/أَصْدِي/g, 'قَصدي');
 
+  processed = applyPluralSuffixFix(processed);
   processed = applyHomographRules(processed);
   processed = applyAllahPronunciation(processed);
 
@@ -1623,7 +1670,7 @@ function shapeFullChapterOnPaste(rawChapterText, customDict = {}) {
 }
 const egyPhon = (t) => { try { return applyEgyptianPhonetics(String(t || '')); } catch (e) { return t; } };
 /* ---------- خط أداة الرداد (الوضع B): تحليل ذكي ← تشكيل ← صوت لكل مقطع بشخصيته وانفعاله ← دمج ---------- */
-const RD_P = [{"id": "kareem", "v": "Orus", "n": "كريم", "a": "narrator_male", "p": 0.95, "i": "deep cinematic narrator voice"}, {"id": "tarek", "v": "Fenrir", "n": "طارق", "a": "adult_male_dramatic", "p": 1.0, "i": "intense dramatic male voice"}, {"id": "youssef", "v": "Puck", "n": "يوسف", "a": "young_male", "p": 1.02, "i": "lively young male voice"}, {"id": "mahmoud", "v": "Charon", "n": "محمود", "a": "elder_male", "p": 0.9, "i": "mature calm older male voice"}, {"id": "noor", "v": "Kore", "n": "نور", "a": "adult_female", "p": 1.05, "i": "warm expressive young female voice"}, {"id": "salma", "v": "Aoede", "n": "سلمى", "a": "narrator_female", "p": 1.02, "i": "confident clear female voice"}, {"id": "layla", "v": "Zephyr", "n": "ليلى", "a": "young_female", "p": 1.08, "i": "soft gentle young female voice"}, {"id": "adam_child", "v": "Leda", "n": "طفل", "a": "child", "p": 1.18, "i": "youthful high-pitched child voice"}];
+const RD_P = [{"id": "kareem", "v": "Charon", "n": "كريم", "a": "narrator_male", "p": 0.95, "i": "deep, resonant, rich baritone (rakheem) storyteller voice, warm and unhurried"}, {"id": "tarek", "v": "Fenrir", "n": "طارق", "a": "adult_male_dramatic", "p": 1.0, "i": "intense dramatic male voice"}, {"id": "youssef", "v": "Puck", "n": "يوسف", "a": "young_male", "p": 1.02, "i": "lively young male voice"}, {"id": "mahmoud", "v": "Algenib", "n": "محمود", "a": "elder_male", "p": 0.9, "i": "mature calm older male voice"}, {"id": "noor", "v": "Kore", "n": "نور", "a": "adult_female", "p": 1.05, "i": "warm expressive young female voice"}, {"id": "salma", "v": "Sulafat", "n": "سلمى", "a": "narrator_female", "p": 1.02, "i": "confident clear female voice"}, {"id": "layla", "v": "Zephyr", "n": "ليلى", "a": "young_female", "p": 1.08, "i": "soft gentle young female voice"}, {"id": "adam_child", "v": "Leda", "n": "طفل", "a": "child", "p": 1.18, "i": "youthful high-pitched child voice"}];
 const RD_I = {"normal": {"l": "عادي", "b": "بأداء تمثيلي طبيعي ومتوازن"}, "strong": {"l": "قوي", "b": "بانفعال قوي وواضح جداً في نبرة الصوت"}, "max": {"l": "أقصى انفعال 🔥", "b": "بأقصى درجات الانفعال التمثيلي الحقيقي من قلب الحدث كأن المشهد حقيقي تماماً"}};
 const RD_E = {"angry_shout": {"l": "غاضب ويصرخ بشدة", "m": "انفعال شديد وغضب عارم وصوت مرتفع حاد كأنك تصرخ في مواجهة حقيقية بكل قوة", "e": "انفعال مصري شديد جداً وغضب عارم وصوت عالي وحاد ومنفعل كأنك بتصرخ بجد في خناقة ومواجهة عنيفة"}, "fear_whisper": {"l": "خائفة وتهمس بارتجاف", "m": "خوف شديد وصوت هامس مرتجف وأنفاس متلاحقة متوترة تكاد تُسمع من شدة الرعب", "e": "خوف ورعب حقيقي وصوت مصري واطي مهموس ومرتجف وبيترعش مع نهجان خفيف كأنها مرعوبة بجد"}, "child_fear": {"l": "يبكي بذعر وخوف (طفل)", "m": "صوت طفل صغير بريء يتحدث بطبقة رفيعة وبنبرة خائفة باكية تستنجد بوالدها", "e": "صوت طفل مصري صغير بيعيط ومذعور وخايف أوي وبيستنجد بمامته أو باباه بنبرة طفولية باكية"}, "crying_sad": {"l": "حزين ومنكسر / يبكي", "m": "حزن عميق وصوت مختنق بالدموع والبكاء والرجاء المؤثر", "e": "صوت مصري حزين جداً ومكسور ومخنوق بالدموع والعياط والوجع كأنه بيعيط بجد"}, "sarcastic_cold": {"l": "ساخر ومتهكم ببرود", "m": "برود قاتل وسخرية لاذعة وثقة مستفزة مع نبرة تهديد خفية", "e": "برود أعصاب وسخرية مصرية لاذعة وتهكم واستفزاز وثقة عالية في الكلام مع نبرة تهديد هادية"}, "shock_surprise": {"l": "مصدوم ومذهول", "m": "صدمة مفاجئة وذهول وعدم تصديق مع شهقة خفيفة وتقطع في الأنفاس", "e": "صدمة كبيرة وذهول مصري وعدم تصديق من المفاجأة"}, "happy_warm": {"l": "فرحان، دافئ، أو حنون", "m": "سعادة غامرة وحماس ودفء عاطفي وابتسامة واضحة في نبرة الصوت", "e": "حنان ودفا مصري وطمأنينة أو فرحة كبيرة في الكلام"}, "dramatic_narrator": {"l": "سرد درامي مشوق", "m": "سرد روائي سينمائي عميق ومتزن يبني التشويق الدرامي ويهيئ المستمع للمشهد", "e": "سرد حكواتي مصري سلس وعميق ومشوق بلهجة مصرية رصينة وطبيعية بدون تكلف"}, "natural_dialogue": {"l": "هادئ وحازم / طبيعي", "m": "نبرة حوارية طبيعية وواضحة وحازمة بهدوء", "e": "كلام مصري قاهري طبيعي وتلقائي وحازم زي كلام المصريين في الحقيقة بالظبط"}};
 const RD_SYS = "أنت مخرج دراما إذاعية مصري خبير في اللهجة العامية المصرية القاهرية والمصطلحات الشعبية والتمثيل الصوتي البشري.\nمهمتك: تحليل الفصل الروائي وتقسيمه بالترتيب إلى مقاطع (سرد للراوي + حوارات الشخصيات) مع كتابة التشكيل الصوتي المصري المتصل (phoneticText) لكل جملة بحيث ينطقها الممثل كإنسان مصري حقيقي بدون أي أخطاء!\nاجعل الحوار بالعامية المصرية والسرد باللغة العربية الفصحى.\n\nقواعد الذاكرة الذاتية والمصطلحات المصرية المدربة (يجب الالتزام بها حرفياً وعدم الخطأ فيها أبداً):\n[]\n\nقواعد حاسمة جداً للمصطلحات والأوزان الصرفية المصرية:\n1. انتبه للمصطلحات الشعبية المصرية التي تختلف حركاتها عن الفصحى:\n   - «رقبتي سدّادة» تُشكّل صوتياً بالمصري: «رَقَبْتِي سَدَّادَه» (بفتح السين وتشديد الدال على وزن فَعَّالَه، وتسكين الباء في رَقَبْتِي، وإياك أن تكتبها سِدادة بالكسر!).\n   - «دمي محروق» ⬅️ «دَمِّي مَحْرُوق»، «حقك عليا» ⬅️ «حَقَّك عَلَيَّا»، «مليش نفس» ⬅️ «مَالِيش نِفْس» (بكسر النون في نِفْس)، «على عيني وراسي» ⬅️ «عَلَى عِينِي وَرَاسِي».\n2. عندما تقرأ سرداً يمهد للحوار مثل: «انفعل «أحمد» بشدة وصرخ وهو يقول بغضب: - أنت إزاي تعمل فيا كدا!»:\n   - السطر الأول هو سرد للراوي (speaker: \"الراوي\", type: \"narration\", emotionId: \"dramatic_narrator\").\n   - السطر الثاني هو بصوت شخصية «أحمد» (speaker: \"أحمد\", type: \"dialogue\") وانفعاله هو الغضب الشديد والصراخ (emotionId: \"angry_shout\")، ودرجة حدة الانفعال هي القصوى (intensity: \"max\").\n3. اكتب «والله» في العامية المصرية هكذا: «وَاللَّاهِي»، واكتب التاء المربوطة عند الوقف بالهاء الصوتية «ه» (مثل: سَدَّادَه، كِفَايَه، خَايْفَه).\n4. اختر speakerArchetype من القيم التالية فقط:\n   - \"narrator_male\" | \"adult_male_dramatic\" | \"young_male\" | \"elder_male\" | \"adult_female\" | \"narrator_female\" | \"young_female\" | \"child\"\n5. اختر emotionId من القيم التالية فقط:\n   - \"angry_shout\" | \"fear_whisper\" | \"child_fear\" | \"crying_sad\" | \"sarcastic_cold\" | \"shock_surprise\" | \"happy_warm\" | \"dramatic_narrator\" | \"natural_dialogue\"\n6. اختر intensity من القيم التالية فقط:\n   - \"normal\" | \"strong\" | \"max\"";
@@ -1645,7 +1692,7 @@ const VOICE_GENDER = { kareem: 'm', tarek: 'm', youssef: 'm', mahmoud: 'm', noor
 /** يتأكد إن صوت الشخصية يطابق جنسها (راجل بصوت ست أو العكس) ولا يستخدم صوت الراوي لشخصية عادية */
 function fixVoiceGender(charInfo, narratorVoiceId = 'kareem') {
   if (!charInfo || !charInfo.voiceId) return charInfo ? charInfo.voiceId : undefined;
-  if (charInfo.category === 'راوي') return charInfo.voiceId;
+  if (charInfo.category === 'راوي' || charInfo.name === 'الراوي') return charInfo.voiceId;
   if (charInfo.category === 'طفل') return charInfo.voiceId;
   const vg = VOICE_GENDER[charInfo.voiceId];
   const arch = charInfo.archetype || '';
@@ -2172,7 +2219,7 @@ const rdPersB = (id) => RD_P.find((p) => p.id === id) || RD_P[0];
 let RD_CF = RD_DEF; // إعدادات الرداد الحالية (بتتظبط أول radadPart)
 const rdPers = (id) => { const b = rdPersB(id), o = (RD_CF.pers || {})[id]; return o ? { ...b, v: o.v || b.v, p: o.p || b.p } : b; };
 const rdByArch = (a) => RD_P.find((p) => p.a === a && !/^narrator/.test(p.a));
-function rdDsp(pcm16, pitch, warm = true) { // بصمة الشخصية (طبقة) + فلتر الدفء — زي الأداة بالظبط
+function rdDsp(pcm16, pitch, warm = true) { pitch = 0; // V10.5: تغيير الطبقة اتعطّل (بيسبب كسر في الصوت) // بصمة الشخصية (طبقة) + فلتر الدفء — زي الأداة بالظبط
   let x = pcm16;
   if (pitch && Math.abs(pitch - 1) >= 0.02) {
     const n = Math.floor(pcm16.length / pitch), o = new Int16Array(n);
@@ -2219,8 +2266,8 @@ const rdScript = (seg, conf) => {
   if ((conf.rd || RD_DEF).humanize && (seg.emotionId === 'fear_whisper' || seg.emotionId === 'crying_sad')) s = s.replace(/\.\./g, '... ');
   return s;
 };
-const RD_CUE = 'in a natural Cairo Egyptian colloquial accent (Masri, never Gulf/Saudi), like a real human in a real conversation: natural breaths, small hesitations, varied pace and pitch, spontaneous and emotionally alive, never robotic and never like reading text aloud';
-const RD_STY = { angry_shout: ['Say angrily and loudly with intense dramatic emotion', 'Say angrily and loudly with intense dramatic emotion in Arabic'], fear_whisper: ['Say in a frightened, trembling, breathless whisper', 'Say in a frightened, trembling whisper in Arabic'], child_fear: ["Say in a scared, crying little child's voice", "Say in a scared, crying little child's voice in Arabic"], crying_sad: ['Say in a sad, heartbroken, tearful voice', 'Say in a sad, tearful voice in Arabic'], sarcastic_cold: ['Say in a cold, sarcastic, mocking tone', 'Say in a cold, sarcastic tone in Arabic'], shock_surprise: ['Say in a shocked, breathless, astonished tone', 'Say in a shocked, astonished tone in Arabic'], happy_warm: ['Say in a warm, affectionate, reassuring Egyptian tone', 'Say in a warm, affectionate, reassuring tone in Arabic'], dramatic_narrator: ['Say as a warm, intimate human storyteller who lives the story, with natural breaths and pauses', 'Say as a warm, expressive human audiobook narrator in clear Modern Standard Arabic, with natural breaths, meaningful pauses and varied pitch, never robotic'], natural_dialogue: ['Say naturally', 'Say as a natural, expressive human speaker in clear Modern Standard Arabic, with natural pauses and intonation, never robotic'] };
+const RD_CUE = 'in a natural Cairo Egyptian colloquial accent (Masri, never Gulf/Saudi), like a real human in a real conversation: natural breaths, small hesitations, varied pace and pitch, spontaneous and emotionally alive; a steady natural chest voice like an ordinary adult, no vocal breaks or cracking, no breathy or affected effeminate softness, no sing-song; end words with sukun and never pronounce Arabic grammatical case endings (i3raab); never robotic and never like reading text aloud';
+const RD_STY = { angry_shout: ['Say angrily and loudly with intense dramatic emotion', 'Say angrily and loudly with intense dramatic emotion in Arabic'], fear_whisper: ['Say in a frightened, trembling, breathless whisper', 'Say in a frightened, trembling whisper in Arabic'], child_fear: ["Say in a scared, crying little child's voice", "Say in a scared, crying little child's voice in Arabic"], crying_sad: ['Say in a sad, heartbroken, tearful voice', 'Say in a sad, tearful voice in Arabic'], sarcastic_cold: ['Say in a cold, sarcastic, mocking tone', 'Say in a cold, sarcastic tone in Arabic'], shock_surprise: ['Say in a shocked, breathless, astonished tone', 'Say in a shocked, astonished tone in Arabic'], happy_warm: ['Say in a warm, affectionate, reassuring Egyptian tone', 'Say in a warm, affectionate, reassuring tone in Arabic'], dramatic_narrator: ['Say as a warm, intimate human storyteller who lives the story, with natural breaths and pauses', 'Say as a deep, resonant, warm human audiobook storyteller in clear Modern Standard Arabic, unhurried measured pace, meaningful pauses, steady chest voice with no vocal breaks, no breathy or affected softness, never robotic'], natural_dialogue: ['Say naturally', 'Say as a natural, expressive human speaker in clear Modern Standard Arabic, steady chest voice, no vocal breaks or affected softness, natural pauses and intonation, never robotic'] };
 async function rdSpeak(env, seg, persona, conf) { // مقطع واحد بصوت شخصيته — نفس صيغة الأداة الجديدة (جملة إخراج قصيرة + النص) بـ3 محاولات
   const egy = rdEgy(seg, conf), script = rdScript(seg, conf), st = RD_STY[seg.emotionId] || RD_STY.natural_dialogue;
   const directive = egy ? st[0] + ' ' + RD_CUE : st[1];
@@ -2265,7 +2312,7 @@ async function rdLearn(env, text, conf) {
     const dd = rdDict(conf), known = new Set([...Object.keys(EGYPTIAN_PHONETIC_LEXICON).map(stripDiacritics), ...Object.keys(dd).map(stripDiacritics)]);
     const freq = {};
     for (const l of lines) for (const w of stripDiacritics(l).match(/[\u0621-\u064A]{3,}/g) || []) if (!known.has(w)) freq[w] = (freq[w] || 0) + 1;
-    const words = Object.keys(freq).slice(0, 120); if (!words.length) return 0;
+    const words = Object.keys(freq).slice(0, 220); if (!words.length) return 0;
     const prompt = 'أنت خبير نطق في العامية المصرية القاهرية. هذه كلمات من حوار مصري بدون تشكيل:\n' + JSON.stringify(words) + '\nأرجع JSON object فقط: المفتاح الكلمة كما هي، والقيمة نفس الكلمة بنفس الحروف تماماً مع إضافة الحركات بنطقها المصري الصحيح.\nشروط: (1) لا تغيّر أي حرف ولا تستبدل القاف بهمزة. (2) أدرج فقط الكلمات العامية أو التي قد تُنطق خطأً أو بنطق مصري مختلف عن الفصحى. (3) أهمل الكلمات الفصيحة العادية وأسماء الأعلام والكلمات المبهمة المعنى بلا سياق.';
     const r = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/models/' + ((conf.rd || RD_DEF).anaModel || 'gemini-3-flash-preview') + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(45000), headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } }) });
     if (!r.ok) return 0;
