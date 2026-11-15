@@ -2791,6 +2791,13 @@ async function route(request, env) {
     return json({ chapters }, 200, { 'Cache-Control': x.password ? 'private, no-store' : 'public, max-age=300' });
   }
 
+  if (path === '/api/trending' && m === 'GET') { // الرائجة: مجموع التصويت + التعليقات لكل رواية
+    const o = {};
+    try { const { results: vs } = await env.DB.prepare('SELECT nid, COUNT(*) AS n FROM pts_votes GROUP BY nid').all(); vs.forEach((r) => { (o[r.nid] = o[r.nid] || { v: 0, c: 0 }).v = r.n; }); } catch (e) {}
+    try { const { results: cs } = await env.DB.prepare('SELECT nid, COUNT(*) AS n FROM cmt_log GROUP BY nid').all(); cs.forEach((r) => { (o[r.nid] = o[r.nid] || { v: 0, c: 0 }).c = r.n; }); } catch (e) {}
+    const top = Object.entries(o).sort((x, y) => (y[1].v + y[1].c) - (x[1].v + x[1].c)).slice(0, 300), out = {}; top.forEach(([k, v]) => { out[k] = v; });
+    return json({ scores: out }, 200, { 'Cache-Control': 'public, max-age=60' });
+  }
   if (path === '/api/reads' && m === 'GET') {
     const { results } = await env.DB.prepare('SELECT k,n FROM reads ORDER BY n DESC LIMIT 1000').all();
     const o = {}; results.forEach((r) => { o[r.k] = r.n; });
