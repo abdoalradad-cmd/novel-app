@@ -7,6 +7,9 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.content.Context;
+import android.content.Intent;
+import android.os.Handler;
+import android.os.Looper;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -171,6 +174,32 @@ public class MainActivity extends BridgeActivity {
         public void set(boolean on) { setSecure(on); }
     }
 
+// الضغط على إشعار الموبايل: بنقرا ref (فصل/رواية) من بيانات الإشعار ونبعته للموقع يفتح المكان ده علطول
+    private void handleRefIntent(Intent intent) {
+        try {
+            if (intent == null) return;
+            String ref = intent.getStringExtra("ref");
+            if (ref == null || ref.length() == 0 || ref.length() > 120) return;
+            final String clean = ref.replaceAll("[^A-Za-z0-9_#\\-]", "");
+            if (clean.length() == 0) return;
+            final String js = "(function(r){try{if(window.__rpDoneRef===r)return;window.__rpPendingRef=r;if(window.__rpDeepLink)window.__rpDeepLink();}catch(e){}})('" + System.currentTimeMillis() + "|" + clean + "')";
+            intent.removeExtra("ref");
+            final Handler h = new Handler(Looper.getMainLooper());
+            // الصفحة ممكن تكون لسه بتفتح (التطبيق كان مقفول) فبنكرر المحاولة؛ الموقع بيتجاهل التكرار
+            int[] delays = {800, 2500, 5000, 9000};
+            for (final int d : delays) {
+                h.postDelayed(new Runnable() { public void run() { try { getBridge().getWebView().evaluateJavascript(js, null); } catch (Throwable t) { } } }, d);
+            }
+        } catch (Throwable t) { }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        try { setIntent(intent); } catch (Throwable t) { }
+        handleRefIntent(intent);
+    }
+
 @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AppNativePlugin.class);
@@ -180,6 +209,7 @@ public class MainActivity extends BridgeActivity {
         installOfflineFirstClient();
         applyCacheMode(true);
         watchNetwork();
+        handleRefIntent(getIntent());
         try {
             WebView wv = getBridge().getWebView();
             try { wv.addJavascriptInterface(new SecureBridge(), "RadPadSecure"); } catch (Throwable t) { }

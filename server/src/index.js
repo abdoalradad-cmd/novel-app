@@ -317,14 +317,14 @@ function cleanNovelPrices(p) {
 const COMMISSION = 0.25; // نسبة الموقع من كل رواية بتتباع
 const payoutOf = (raw) => { const o = parseJson(raw); return o.value ? { kind: o.kind === 'instapay' ? 'instapay' : 'wallet', value: String(o.value), name: String(o.name || '') } : null; };
 async function notifyUser(env, uid, title, text, ref = 'ord') {
-  try { await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(uid, 'payment', ref, 'RadPad', title, text, Date.now()).run(); if (env.FCM_SA) await sendPush(env, title, text, '', 'u_' + uid); } catch (e) {}
+  try { await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(uid, 'payment', ref, 'RadPad', title, text, Date.now()).run(); if (env.FCM_SA) await sendPush(env, title, text, '', 'u_' + uid, ref); } catch (e) {}
 }
 async function notifyAdmins(env, who, title, text, ref = 'ordadm') {
   try {
     const { results } = await env.DB.prepare("SELECT id FROM users WHERE role='admin'").all();
     for (const a of results) {
       await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(a.id, 'payment', ref, who, title, text, Date.now()).run();
-      if (env.FCM_SA) { try { await sendPush(env, title, text, '', 'u_' + a.id); } catch (e) {} }
+      if (env.FCM_SA) { try { await sendPush(env, title, text, '', 'u_' + a.id, ref); } catch (e) {} }
     }
   } catch (e) {}
 }
@@ -2282,7 +2282,7 @@ async function ttsAlertAdmins(env, title, text, prov = 'gemini') {
     const { results } = await env.DB.prepare("SELECT id FROM users WHERE role='admin'").all();
     for (const a of results) {
       await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(a.id, 'payment', 'pay', 'RadPad', title, text, now).run();
-      if (env.FCM_SA) { try { await sendPush(env, title, text, '', 'u_' + a.id); } catch (e) {} }
+      if (env.FCM_SA) { try { await sendPush(env, title, text, '', 'u_' + a.id, 'pay'); } catch (e) {} }
     }
   } catch (e) {}
 }
@@ -2471,7 +2471,7 @@ async function ttsDoneNotify(env, ch) { // فصل اتحوّل لصوت: إشع�
   const ref = 'tts' + ch.nid + '#' + ch.idx;
   if (await env.DB.prepare('SELECT 1 AS x FROM notes WHERE uid=? AND novel_ref=?').bind(au.id, ref).first()) return;
   await notifyUser(env, au.id, 'الفصل اتحوّل لصوت 🎧', '«' + nt + '» — ' + cn + ' بقى ينفع تسمعه دلوقتي.', ref);
-  if (cf.followers && env.FCM_SA) await sendPush(env, '🎧 فصل جديد بالصوت من ' + au.name, '«' + nt + '» — ' + cn + ' بقى متاح للاستماع.', '', 'a_' + au.id);
+  if (cf.followers && env.FCM_SA) await sendPush(env, '🎧 فصل جديد بالصوت من ' + au.name, '«' + nt + '» — ' + cn + ' بقى متاح للاستماع.', '', 'a_' + au.id, ch.nid + '#' + ch.idx);
 }
 async function ttsStats(env) {
   const conf = await getTtsConf(env), d = dayKey(), mo = d.slice(0, 7), pr = ttsPrices(conf);
@@ -2554,14 +2554,15 @@ async function releasesTick(env) { // من الـ Cron: فصل مجدول حان
     const rel = extraOf(r.l_extra).rel; let hit = -1; rel.forEach((v, i) => { if (v > last && v <= now && i > hit) hit = i; });
     if (hit < 0) continue;
     await env.DB.prepare('INSERT INTO events (author_id,kind,novel_id,title,ts) VALUES (?,?,?,?,?)').bind(r.user_id, 'chapter', r.id, r.l_title, now).run();
-    if (env.FCM_SA) { const c = await env.DB.prepare("SELECT title FROM chapters WHERE novel_id=? AND ver='l' AND idx=?").bind(r.id, hit).first(); await sendPush(env, 'فصل جديد من ' + r.name, '«' + r.l_title + '»' + (c ? ' — ' + c.title : ''), '', r.role === 'admin' ? 'all' : 'a_' + r.user_id); }
+    if (env.FCM_SA) { const c = await env.DB.prepare("SELECT title FROM chapters WHERE novel_id=? AND ver='l' AND idx=?").bind(r.id, hit).first(); await sendPush(env, 'فصل جديد من ' + r.name, '«' + r.l_title + '»' + (c ? ' — ' + c.title : ''), '', r.role === 'admin' ? 'all' : 'a_' + r.user_id, 'u' + r.id + '#' + hit); }
   }
 }
 async function alertsTick(env) { // من الـ Cron: لما يحين ميعاد فصل مجدول يتبعت إشعار لكل اللي ضغطوا «نبهني»
   const now = Date.now(), { results } = await env.DB.prepare('SELECT uid,nid,ch,title FROM ch_alerts WHERE sent=0 AND rel>0 AND rel<=? LIMIT 300').bind(now).all();
   for (const a of results) {
     const up = await env.DB.prepare('UPDATE ch_alerts SET sent=1 WHERE uid=? AND nid=? AND ch=? AND sent=0').bind(a.uid, a.nid, a.ch).run();
-    if (up && up.meta && up.meta.changes) await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(a.uid, 'release', a.nid, '', a.title || 'فصل جديد', 'الفصل اللي كنت مستنيه نزل دلوقتي 🎉 اقرأه الآن', now).run();
+    if (up && up.meta && up.meta.changes) await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(a.uid, 'release', a.nid + '#' + a.ch, '', a.title || 'فصل جديد', 'الفصل اللي كنت مستنيه نزل دلوقتي 🎉 اقرأه الآن', now).run();
+    if (up && up.meta && up.meta.changes && env.FCM_SA) { try { await sendPush(env, a.title || 'فصل جديد', 'الفصل اللي كنت مستنيه نزل دلوقتي 🎉 اقرأه الآن', '', 'u_' + a.uid, a.nid + '#' + a.ch); } catch (e) {} }
   }
   await env.DB.prepare('DELETE FROM ch_alerts WHERE sent=1 AND rel<?').bind(now - 30 * 86400000).run();
 }
@@ -2696,11 +2697,11 @@ async function fcmAccessToken(sa) {
   if (!j.access_token) throw new Error('فشل الاتصال بـ Firebase: ' + (j.error_description || j.error || ''));
   return j.access_token;
 }
-async function sendPush(env, title, text, link, topic) {
+async function sendPush(env, title, text, link, topic, ref) {
   if (!env.FCM_SA) throw new Error('إشعارات الموبايل مش متفعّلة لسه (محتاجة ملف Firebase — راجع الشرح)');
   let sa; try { sa = JSON.parse(env.FCM_SA); } catch (e) { throw new Error('ملف Firebase المحفوظ غير صحيح'); }
   const token = await fcmAccessToken(sa);
-  const msg = { message: { topic: topic || 'all', notification: { title: title || 'RadPad', body: text || '' }, data: { url: link || '' }, android: { priority: 'HIGH', notification: { channel_id: 'radpad_alerts', sound: 'default' } } } };
+  const msg = { message: { topic: topic || 'all', notification: { title: title || 'RadPad', body: text || '' }, data: { url: link || '', ref: ref || '' }, android: { priority: 'HIGH', notification: { channel_id: 'radpad_alerts', sound: 'default' } } } };
   const r = await fetch('https://fcm.googleapis.com/v1/projects/' + sa.project_id + '/messages:send', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(msg) });
   if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error('رفض Firebase الإرسال: ' + ((j.error && j.error.message) || r.status)); }
 }
@@ -3064,9 +3065,10 @@ async function route(request, env) {
     const snip = str(b.snippet, 400).trim().slice(0, 120);
     const head = kind === 'rating' ? '⭐ تقييم جديد على روايتك' : '💬 تعليق جديد على روايتك';
     const text = user.name + (kind === 'rating' ? ' قيّم «' + title + '» ' + stars + '/5' : ' علّق على «' + title + '»' + (b.stars ? ' (⭐ ' + stars + '/5)' : '') + (snip ? ': ' + snip : ''));
-    await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(target, kind, ref, user.name, head, text, Date.now()).run();
+    const chN = Number.isInteger(+b.chapter) && +b.chapter >= 0 && +b.chapter <= 9999 ? '#' + (+b.chapter) : '', nref = ref + chN;
+    await env.DB.prepare('INSERT INTO notes (uid,kind,novel_ref,who,title,text,ts) VALUES (?,?,?,?,?,?,?)').bind(target, kind, nref, user.name, head, text, Date.now()).run();
     await env.DB.prepare('DELETE FROM notes WHERE ts < ?').bind(Date.now() - 60 * 86400000).run();
-    try { await sendPush(env, head, text, '', 'u_' + target); } catch (e) {}
+    try { await sendPush(env, head, text, '', 'u_' + target, nref); } catch (e) {}
     return json({ ok: true });
   }
   if ((g = /^\/api\/my\/novels\/(\d+)\/paper$/.exec(path)) && m === 'PUT') { // تغيير نوع الرواية (ورقية/إلكترونية) فورًا من غير مراجعة
@@ -3314,7 +3316,7 @@ async function route(request, env) {
           await env.DB.prepare('INSERT INTO events (author_id,kind,novel_id,title,ts) VALUES (?,?,?,?,?)').bind(r.user_id, kind, id, r.d_title, now).run();
           if (env.FCM_SA && au) {
             const last = kind === 'chapter' ? (await env.DB.prepare("SELECT title FROM chapters WHERE novel_id=? AND ver='l' ORDER BY idx DESC LIMIT 1").bind(id).first()) : null;
-            await sendPush(env, kind === 'novel' ? 'رواية جديدة من ' + au.name : 'فصل جديد من ' + au.name, '«' + r.d_title + '»' + (last ? ' — ' + last.title : ''), '', au.role === 'admin' ? 'all' : 'a_' + au.id);
+            await sendPush(env, kind === 'novel' ? 'رواية جديدة من ' + au.name : 'فصل جديد من ' + au.name, '«' + r.d_title + '»' + (last ? ' — ' + last.title : ''), '', au.role === 'admin' ? 'all' : 'a_' + au.id, 'u' + id + (kind === 'chapter' ? '#' + (newCnt - 1) : ''));
           }
         }
         try { await pubAfterApprove(env, r, id, kind, newCnt, oldCnt); } catch (e) {}
