@@ -332,43 +332,38 @@ async function notifyAdmins(env, who, title, text, ref = 'ordadm') {
 /* ---------- الصوت المصري: Gemini + Azure — طابور لكل مزوّد + أصوات متعددة + تخزين R2 + متابعة التكلفة ---------- */
 const ROLES = ['narrator', 'man', 'woman', 'boy', 'girl'];
 const G_VOICES = { narrator: 'Charon', man: 'Orus', woman: 'Kore', boy: 'Puck', girl: 'Leda' };
-const AZ_VOICES = { narrator: { v: 'ar-SA-HamedNeural', rate: '-4%', pitch: '0%' }, man: { v: 'ar-EG-ShakirNeural', rate: '0%', pitch: '0%' }, woman: { v: 'ar-EG-SalmaNeural', rate: '0%', pitch: '0%' },
-  boy: { v: 'ar-EG-ShakirNeural', rate: '+6%', pitch: '+38%' }, girl: { v: 'ar-EG-SalmaNeural', rate: '+6%', pitch: '+30%' } };
-const RD_DEF = { mode: 'B', skipNarration: false, humanize: true, pauseMs: 380, batch: 7, autoWait: true, waitSec: 16, narrator: 'kareem', archMap: {}, pers: {}, analysis: 'ai', anaModel: 'gemini-3-flash-preview', partChars: 0 };
+const RD_DEF = { mode: 'B', skipNarration: false, humanize: true, pauseMs: 380, batch: 7, autoWait: true, waitSec: 16, narrator: 'kareem', archMap: {}, pers: {}, analysis: 'ai', anaModel: 'gemini-3-flash-preview', partChars: 0, dialect: 2 };
 function normRd(x) { // كل إعدادات أداة الرداد (كلها بتتغيّر من الأدمن؛ الافتراضي = اللي كان شغال)
   x = x && typeof x === 'object' ? x : {}; const num = (v, d, lo, hi) => (v == null || v === '' || isNaN(+v) ? d : Math.max(lo, Math.min(hi, +v)));
   const ids = RD_P.map((p) => p.id), am = {}, ps = {};
   Object.entries(x.archMap || {}).forEach(([k, v]) => { if (ids.includes(v) && /^[a-z_]{2,40}$/.test(k)) am[k] = v; });
   Object.entries(x.pers || {}).forEach(([k, v]) => { if (ids.includes(k) && v) ps[k] = { v: /^[A-Za-z]{3,24}$/.test(v.v || '') ? v.v : '', p: +v.p ? num(v.p, 0, 0.7, 1.4) : 0 }; });
-  return { mode: ['A', 'B', 'C'].includes(x.mode) ? x.mode : 'B', analysis: x.analysis === 'local' ? 'local' : 'ai', skipNarration: x.skipNarration === true, humanize: x.humanize !== false, pauseMs: num(x.pauseMs, 380, 0, 3000), batch: Math.round(num(x.batch, 7, 1, 10)), autoWait: x.autoWait !== false, waitSec: Math.round(num(x.waitSec, 16, 0, 60)), narrator: ids.includes(x.narrator) ? x.narrator : 'kareem', archMap: am, pers: ps, anaModel: /^[a-z0-9.\-]{4,60}$/i.test(x.anaModel || '') ? x.anaModel : 'gemini-3-flash-preview', partChars: Math.round(num(x.partChars, 0, 0, 3000)), learn: x.learn !== false };
+  return { mode: ['A', 'B', 'C'].includes(x.mode) ? x.mode : 'B', analysis: x.analysis === 'local' ? 'local' : 'ai', skipNarration: x.skipNarration === true, humanize: x.humanize !== false, pauseMs: num(x.pauseMs, 380, 0, 3000), batch: Math.round(num(x.batch, 7, 1, 10)), autoWait: x.autoWait !== false, waitSec: Math.round(num(x.waitSec, 16, 0, 60)), narrator: ids.includes(x.narrator) ? x.narrator : 'kareem', archMap: am, pers: ps, anaModel: /^[a-z0-9.\-]{4,60}$/i.test(x.anaModel || '') ? x.anaModel : 'gemini-3-flash-preview', partChars: Math.round(num(x.partChars, 0, 0, 3000)), learn: x.learn !== false, dialect: Math.round(num(x.dialect, 2, 0, 2)) };
 }
 const TTS_DEFAULT = { model: 'gemini-3.8-flash-tts', legacyModel: 'gemini-2.5-flash-preview-tts', style: 'warm, expressive audiobook narration in natural Egyptian Arabic', concurrency: 2, dailyMin: 20, freeMin: 0, priceIn: 0, priceOut: 0,
-  gv: G_VOICES, defProv: 'gemini', novelProv: {}, multi: true, az: { region: '', dailyMin: 30, freeChars: 500000, price: 15, concurrency: 3, voices: AZ_VOICES } };
-const PROVS = ['gemini', 'gemini2', 'gemini3', 'gemini4', 'gemini5', 'gemini6', 'rd1', 'rd2', 'rd3', 'rd4', 'rd5', 'rd6', 'azure'];
+  gv: G_VOICES, defProv: 'gemini', novelProv: {} };
+const PROVS = ['gemini', 'gemini2', 'gemini3', 'gemini4', 'gemini5', 'gemini6', 'rd1', 'rd2', 'rd3', 'rd4', 'rd5', 'rd6'];
 const isGoogle = (p) => /^(gemini\d*|rd[1-6])$/.test(p);
 const normProv = (p) => (PROVS.includes(p) ? p : 'gemini');
-const isGem = (p) => p !== 'azure';
 // حسابات جوجل (1..6): كل حساب له مفتاحه وإعداداته وطابوره. المفتاح من أسرار Cloudflare (GEMINI_API_KEY, _2.._6) أو متسجّل من لوحة الأدمن
 const GN = { gemini: '', gemini2: '_2', gemini3: '_3', gemini4: '_4', gemini5: '_5', gemini6: '_6', rd1: '_RD1', rd2: '_RD2', rd3: '_RD3', rd4: '_RD4', rd5: '_RD5', rd6: '_RD6' };
 const gemKey = (env, prov) => env['GEMINI_API_KEY' + (GN[prov] || '')];
 const gemEnv = (env, prov) => (prov === 'gemini' ? env : { ...env, GEMINI_API_KEY: gemKey(env, prov) });
 const gcf = (conf, prov) => (prov === 'gemini' ? conf : conf[(prov[0] === 'r' ? 'r' + prov.slice(2) : 'g' + prov.slice(6))] || { dailyMin: 0, concurrency: 1, freeMin: 0 });
-const provCap = (conf, prov) => (prov === 'azure' ? conf.az.dailyMin : gcf(conf, prov).dailyMin);
+const provCap = (conf, prov) => gcf(conf, prov).dailyMin;
 // السقف اليومي بيتضرب في عدد مفاتيح الحساب (كل مفتاح ليه حصته)
-const provCapE = (env, conf, prov) => provCap(conf, prov) * (prov === 'azure' ? 1 : Math.max(1, gKeyList({ GEMINI_API_KEY: gemKey(env, prov) }).length));
-const provPar = (conf, prov) => (prov === 'azure' ? conf.az.concurrency : gcf(conf, prov).concurrency);
+const provCapE = (env, conf, prov) => provCap(conf, prov) * Math.max(1, gKeyList({ GEMINI_API_KEY: gemKey(env, prov) }).length);
+const provPar = (conf, prov) => gcf(conf, prov).concurrency;
 let KC = { at: 0, v: null };
 async function savedKeys(env) { if (!KC.v || Date.now() - KC.at > 15000) KC = { at: Date.now(), v: (await getSetting(env, 'tts_keys')) || {} }; return KC.v; }
 async function withKeys(env) { const k = await savedKeys(env), e = { ...env, __base: env.__base || env }; for (const p of PROVS) if (isGoogle(p) && k[p]) e['GEMINI_API_KEY' + GN[p]] = k[p]; return e; }
 async function getTtsConf(env) {
   const x = await getSetting(env, 'tts'), n = (v, d, lo, hi) => { const k = Number(v); return v !== '' && v != null && Number.isFinite(k) && k >= lo && k <= hi ? k : d; };
   const gv = {}; ROLES.forEach((r) => { const v = x.gv && x.gv[r]; gv[r] = /^[A-Za-z0-9_-]{2,40}$/.test(String(v || '')) ? String(v) : G_VOICES[r]; });
-  const xa = x.az || {}, voices = {};
-  ROLES.forEach((r) => { const v = (xa.voices || {})[r] || {}, d = AZ_VOICES[r]; voices[r] = { v: /^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]{2,40}$/.test(String(v.v || '')) ? String(v.v) : d.v, rate: /^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.rate || '')) ? String(v.rate) : d.rate, pitch: /^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.pitch || '')) ? String(v.pitch) : d.pitch }; });
   const np = {}; Object.keys(x.novelProv || {}).slice(0, 2000).forEach((k) => { if (PROVS.includes(x.novelProv[k])) np[k] = x.novelProv[k]; });
-  return { mm: x.mm !== false, model: x.model || TTS_DEFAULT.model, legacyModel: x.legacyModel || TTS_DEFAULT.legacyModel, style: x.style || TTS_DEFAULT.style, gv,
+  return { model: x.model || TTS_DEFAULT.model, legacyModel: x.legacyModel || TTS_DEFAULT.legacyModel, style: x.style || TTS_DEFAULT.style, gv,
     concurrency: n(x.concurrency, TTS_DEFAULT.concurrency, 1, 4), dailyMin: n(x.dailyMin, TTS_DEFAULT.dailyMin, 0, 100000), freeMin: n(x.freeMin, 0, 0, 100000), priceIn: n(x.priceIn, 0, 0, 1000), priceOut: n(x.priceOut, 0, 0, 1000),
-    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, multi: x.multi !== false, rd: normRd(x.rd), radad: x.radad !== false, engine: x.engine === 'single' ? 'single' : 'mega', phon: x.phon !== false, smart: x.smart !== false, econ: x.econ !== false, hideListen: x.hideListen === true, listenAll: x.listenAll === true, rebalance: x.rebalance !== false, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
+    defProv: PROVS.includes(x.defProv) ? x.defProv : 'gemini', novelProv: np, rd: normRd(x.rd), engine: x.engine === 'single' ? 'single' : 'mega', phon: x.phon !== false, hideListen: x.hideListen === true, listenAll: x.listenAll === true, rebalance: x.rebalance !== false, annModel: /^[A-Za-z0-9._-]{2,60}$/.test(String(x.annModel || '')) ? String(x.annModel) : 'gemini-2.5-flash', dict: String(x.dict || '').slice(0, 3000),
     g2: { dailyMin: n((x.g2 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g2 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g2 || {}).concurrency, 2, 1, 4) },
     g3: { dailyMin: n((x.g3 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g3 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g3 || {}).concurrency, 2, 1, 4) },
     g4: { dailyMin: n((x.g4 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.g4 || {}).freeMin, 0, 0, 100000), concurrency: n((x.g4 || {}).concurrency, 2, 1, 4) },
@@ -379,11 +374,9 @@ async function getTtsConf(env) {
     r3: { dailyMin: n((x.r3 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.r3 || {}).freeMin, 0, 0, 100000), concurrency: n((x.r3 || {}).concurrency, 2, 1, 4) },
     r4: { dailyMin: n((x.r4 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.r4 || {}).freeMin, 0, 0, 100000), concurrency: n((x.r4 || {}).concurrency, 2, 1, 4) },
     r5: { dailyMin: n((x.r5 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.r5 || {}).freeMin, 0, 0, 100000), concurrency: n((x.r5 || {}).concurrency, 2, 1, 4) },
-    r6: { dailyMin: n((x.r6 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.r6 || {}).freeMin, 0, 0, 100000), concurrency: n((x.r6 || {}).concurrency, 2, 1, 4) },
-    az: { region: /^[a-z0-9-]{3,30}$/.test(String(xa.region || '')) ? String(xa.region) : '', dailyMin: n(xa.dailyMin, 30, 0, 100000), freeChars: n(xa.freeChars, 500000, 0, 1e9), price: n(xa.price, 15, 0, 1000), concurrency: n(xa.concurrency, 3, 1, 8), voices } };
+    r6: { dailyMin: n((x.r6 || {}).dailyMin, 20, 0, 100000), freeMin: n((x.r6 || {}).freeMin, 0, 0, 100000), concurrency: n((x.r6 || {}).concurrency, 2, 1, 4) }};
 }
-const azRegion = (env, conf) => conf.az.region || String(env.AZURE_SPEECH_REGION || '').trim().toLowerCase();
-const provReady = (env, conf, prov) => !!env.TTS_BUCKET && (prov === 'azure' ? !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)) : !!gemKey(env, prov));
+const provReady = (env, conf, prov) => !!env.TTS_BUCKET && !!gemKey(env, prov);
 function ttsPrices(conf, now = Date.now()) { const late = now >= Date.UTC(2027, 0, 1); return { inP: conf.priceIn || (late ? 1 : 0.5), outP: conf.priceOut || (late ? 18 : 9) }; }
 function ttsCost(chars, secs, conf) { const p = ttsPrices(conf); return (Math.ceil(chars / 2.5) * p.inP + secs * 25 * p.outP) / 1e6; }
 const dayKey = (t = Date.now()) => new Date(t + 2 * 3600000).toISOString().slice(0, 10); // بتوقيت مصر تقريبًا
@@ -418,185 +411,26 @@ async function gFetch(env, url, init) {
   return last;
 }
 async function q429(r) { try { const t = await r.text(); let m = ''; try { const j = JSON.parse(t); m = (j.error && j.error.message) || ''; const d = JSON.stringify((j.error && j.error.details) || ''); const q = /"quotaId":"([^"]+)"/.exec(d); if (q) m += ' [' + q[1] + ']'; } catch (e) { m = t; } return String(m).slice(0, 260); } catch (e) { return ''; } }
-const pacificMinsLeft = () => { try { const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date()), h = +p.find((x) => x.type === 'hour').value, m = +p.find((x) => x.type === 'minute').value; return 24 * 60 - (h * 60 + m) + 2; } catch (e) { return 120; } };
-async function geminiSpeak(env, text, voiceName, conf, style) {
-  try { return await geminiSpeak0(env, text, voiceName, conf, style); } catch (e) {
-    if (e.code !== 429 || /PerDay|per day/i.test(e.detail || '')) throw e; await new Promise((r) => setTimeout(r, 4000)); return geminiSpeak0(env, text, voiceName, conf, style);
-  }
-}
-async function geminiSpeak0(env, text, voiceName, conf, style) {
-  style = style || conf.style;
-  const key = env.GEMINI_API_KEY; if (!key) { const e = new Error('not_configured'); e.code = 503; throw e; }
-  let lastErr;
-  try {
-    const r = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify({ model: conf.model, input: [{ type: 'user_input', content: [{ type: 'text', text, annotations: [{ type: 'speech_metadata', style }] }] }], response_format: { type: 'audio' }, generation_config: { speech_config: [{ voice: voiceName }] } }) });
-    if (r.status === 429) { const d = await q429(r); const e = new Error('busy'); e.code = 429; e.detail = d; throw e; }
-    else if (r.ok) { const j = await r.json(); const b = findAudioB64(j); if (b) return toWav(b); lastErr = new Error('no_audio'); } else lastErr = new Error('gemini_' + r.status);
-  } catch (e) { if (e.code === 429) throw e; lastErr = e; }
-  const r2 = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-    body: JSON.stringify({ contents: [{ parts: [{ text: 'Read the following in a ' + style + ': ' + text }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } } } }) });
-  if (r2.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r2); throw e; }
-  if (!r2.ok) { const e = new Error('gemini_' + r2.status); e.code = 502; e.detail = lastErr && lastErr.message; throw e; }
-  const b2 = findAudioB64(await r2.json()); if (!b2) { const e = new Error('no_audio'); e.code = 502; throw e; }
-  return toWav(b2);
-}
 /* ---------- تقسيم النص لأدوار: راوي / راجل / ست / ولد / بنت ---------- */
-const AR_NORM = (t) => String(t || '').replace(/[ً-ٟـ]/g, '').replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي');
 const SPEECH_STEMS = ['قال', 'رد', 'همس', 'صرخ', 'صاح', 'سال', 'اجاب', 'تمتم', 'هتف', 'اضاف', 'تابع', 'زمجر', 'تنهد', 'ضحك', 'بكي', 'نادي', 'اعترض', 'اكد', 'قاطع', 'هدر', 'تافف', 'تساءل', 'اعترف', 'اردف', 'تحدث', 'توسل', 'استنكر', 'تذمر', 'تلعثم', 'شهق', 'ابتسم', 'لعن', 'امر', 'اقترح', 'عقب', 'علق', 'فسر', 'شرح', 'حذر', 'ردد', 'كرر', 'غمغم', 'تمتمت', 'زعق', 'عاتب', 'رجا', 'قرر', 'سخر', 'همهم', 'اجابه', 'اجابها'];
 const SP_M = [...new Set(SPEECH_STEMS)].filter((x) => x !== 'تمتمت'), SP_F = SP_M.map((x) => (/ي$/.test(x) ? x.slice(0, -1) : x) + 'ت');
 const reSpM = new RegExp('(?:^|[\\s،,.:؛"«»\\-])[وف]?(?:' + SP_M.join('|') + ')(?:ه|ها|لها|له|لهم)?(?=[\\s،,.:؛"«»!؟?\\-]|$)');
 const reSpF = new RegExp('(?:^|[\\s،,.:؛"«»\\-])[وف]?(?:' + SP_F.join('|') + ')(?:ه|ها|لها|له|لهم)?(?=[\\s،,.:؛"«»!؟?\\-]|$)');
 const reKidG = /(?:^|[\s،,.:؛])(?:ال)?(?:طفلة|صغيرة|بنت صغيرة|فتاة صغيرة|البنت الصغيرة|الفتاة الصغيرة|طفلتي|طفلتها|بنتها الصغيرة)(?=[\s،,.:؛]|$)/;
 const reKidB = /(?:^|[\s،,.:؛])(?:ال)?(?:طفل|صغير|ولد صغير|صبي|غلام|الولد الصغير|طفلي|طفلها)(?=[\s،,.:؛]|$)/;
-function guessSpeaker(after, before) {
-  const bf = /[:：]\s*$/.test(before || ''); // «قال أحمد: «...»» → المتكلم اللي قبل النقطتين
-  for (const ctx of (bf ? [before, after] : [after, before])) {
-    if (!ctx) continue;
-    const n = AR_NORM(ctx), f = reSpF.test(n), m = reSpM.test(n);
-    const kg = reKidG.test(n), kb = reKidB.test(n);
-    if (kg || kb) { const g = kg && !kb ? 'girl' : (kb && !kg ? 'boy' : (f && !m ? 'girl' : 'boy')); return g; }
-    if (f && !m) return 'woman';
-    if (m && !f) return 'man';
-    if (f && m) { const fi = n.search(reSpF), mi = n.search(reSpM); return fi <= mi ? 'woman' : 'man'; }
-  }
-  return null;
-}
 const OPP = { man: 'woman', woman: 'man', boy: 'man', girl: 'woman' };
 // بيرجّع [{role, text}] (النص من غير علامات التنصيص والشرطات). بدون حوار = راوي واحد.
-function segmentRoles(text) {
-  const items = []; // {dlg:boolean, t, line, ls, a, b}
-  const lines = String(text).split('\n');
-  const lineMeta = [];
-  lines.forEach((line, li) => {
-    if (!line.trim()) return;
-    const segs = [];
-    const dash = /^(\s*)[-–—]+\s*/.exec(line);
-    if (dash) {
-      const rest = line.slice(dash[0].length); let pos = dash[0].length;
-      const pieces = rest.split(/\s[-–—]+\s/); let isD = true;
-      for (const pc of pieces) {
-        if (isD) {
-          const m = /([.!؟?…،])\s*((?:[وف]?(?:قال|رد|همس|صرخ|صاح|سال|اجاب|تمتم|هتف|اضاف|تابع|زمجر|تنهد|ضحك|بكى|نادى|اعترض|أكد|قاطع|هدر|تأفف|تساءل|اعترف|أردف|سأل|أجاب|أضاف)(?:ت)?)(?:\s|$).*)$/.exec(pc);
-          if (m && AR_NORM(m[2]).length) { const cut = pc.length - m[2].length; segs.push({ d: true, a: pos, b: pos + cut }); segs.push({ d: false, a: pos + cut, b: pos + pc.length }); }
-          else segs.push({ d: true, a: pos, b: pos + pc.length });
-        } else segs.push({ d: false, a: pos, b: pos + pc.length });
-        pos += pc.length + 0; const sepM = /^\s[-–—]+\s/.exec(rest.slice(pos - dash[0].length)); if (sepM) { segs.push({ d: false, a: pos, b: pos + sepM[0].length, sep: true }); pos += sepM[0].length; }
-        isD = !isD;
-      }
-    } else {
-      const re = /«([^»]+)»|"([^"]+)"|“([^”]+)”/g; let m, last = 0;
-      while ((m = re.exec(line))) {
-        const inner = m[1] || m[2] || m[3] || '';
-        if (inner.trim().split(/\s+/).length < 2) continue;
-        if (m.index > last) segs.push({ d: false, a: last, b: m.index });
-        segs.push({ d: true, a: m.index + 1, b: m.index + m[0].length - 1 }); last = m.index + m[0].length;
-      }
-      if (last < line.length) segs.push({ d: false, a: last, b: line.length });
-    }
-    lineMeta.push({ line, segs, onlyD: segs.filter((s) => s.d).length > 0 && segs.every((s) => s.d || !/[؀-ۿA-Za-z0-9]/.test(line.slice(s.a, s.b))) });
-  });
-  const out = []; let hist = [], prevOnlyD = false;
-  const push = (role, t) => { t = t.replace(/[«»"“”]/g, ' ').replace(/^[\s،,:؛]+/, '').replace(/^\s*[-–—]+\s*/, '').replace(/\s+/g, ' ').trim(); if (!/[؀-ۿA-Za-z0-9]/.test(t)) return; const l = out[out.length - 1]; if (l && l.role === role) l.text += ' ' + t; else out.push({ role, text: t }); };
-  for (const lm of lineMeta) {
-    const { line, segs } = lm;
-    segs.forEach((sg, si) => {
-      const t = line.slice(sg.a, sg.b);
-      if (!sg.d) { if (!sg.sep) push('narrator', t); return; }
-      const next = segs.slice(si + 1).find((x) => !x.d && !x.sep), prev = [...segs.slice(0, si)].reverse().find((x) => !x.d && !x.sep);
-      let after = next ? line.slice(next.a, Math.min(next.b, next.a + 70)) : '', before = prev ? line.slice(Math.max(prev.a, prev.b - 70), prev.b) : '';
-      after = after.replace(/[«»"“”].*$/, ''); before = before.replace(/^.*[«»"“”]/, '');
-      let role = guessSpeaker(after.slice(0, 45), before);
-      if (!role) {
-        const last = hist[hist.length - 1];
-        if (!last) role = 'man';
-        else if (prevOnlyD || si > 0 && segs[si - 1] && segs[si - 1].d) role = hist.length > 1 && hist[hist.length - 2] !== last ? hist[hist.length - 2] : OPP[last];
-        else role = last;
-      }
-      if (hist[hist.length - 1] !== role) hist.push(role); if (hist.length > 4) hist.shift();
-      push(role, t);
-    });
-    prevOnlyD = lm.onlyD;
-  }
-  if (!out.length) { const t = String(text).replace(/[«»"“”]/g, ' ').replace(/\s+/g, ' ').trim(); if (t) out.push({ role: 'narrator', text: t }); }
-  return out;
-}
-const stripMarks = (t) => String(t).replace(/[«»"“”]/g, ' ').replace(/^\s*[-–—]+\s*/gm, '').replace(/\s+/g, ' ').trim();
 function wavPcm(b) { // يرجّع بيانات الصوت (PCM) من ملف WAV
   for (let i = 12; i + 8 <= b.length;) { const id = String.fromCharCode(b[i], b[i + 1], b[i + 2], b[i + 3]), sz = b[i + 4] | (b[i + 5] << 8) | (b[i + 6] << 16) | (b[i + 7] << 24); if (id === 'data') return b.subarray(i + 8, sz > 0 && i + 8 + sz <= b.length ? i + 8 + sz : b.length); i += 8 + sz + (sz & 1); }
   return b.subarray(44);
 }
-function joinWavs(list) {
-  if (list.length === 1) return list[0];
-  const gap = new Uint8Array(Math.round(24000 * 0.22) * 2), pcms = []; list.forEach((w, i) => { if (i) pcms.push(gap); pcms.push(wavPcm(w)); });
-  let n = 0; pcms.forEach((p) => (n += p.length)); const all = new Uint8Array(n); let o = 0; pcms.forEach((p) => { all.set(p, o); o += p.length; }); return pcmToWav(all, 24000);
-}
 const ROLE_EN = { narrator: 'the narrator', man: 'an adult man', woman: 'an adult woman', boy: 'a young boy', girl: 'a young girl' };
 const DIA_N = 'narrating in clear Modern Standard Arabic (Fusha) with correct grammar and pronunciation, never colloquial';
 const DIA_C = 'speaking in 100% natural Egyptian colloquial Arabic (Cairene, hard "g" for jim), never Fusha';
-const roleStyle = (conf, role, emo) => (role === 'narrator' ? 'warm, expressive audiobook voice ' + DIA_N : 'warm, expressive audiobook acting, ' + DIA_C + ', performing the character of ' + ROLE_EN[role] + (role === 'boy' || role === 'girl' ? ' with a childlike voice' : '')) + (emo ? ', acting it out: ' + emo : '');
-async function geminiMulti(env, roleA, roleB, items, conf) { // سطرين متكلمين في طلب واحد
-  const key = env.GEMINI_API_KEY, nm = { narrator: 'Narrator', man: 'Man', woman: 'Woman', boy: 'Boy', girl: 'Girl' };
-  const prompt = 'Perform this audiobook scene like a gifted voice actor. STRICT DIALECT RULE: the Narrator reads in clear Modern Standard Arabic (Fusha); every character speaks 100% natural Egyptian colloquial Arabic (Cairene). Truly living the moment and reacting to what is happening (never robotic). Each line may carry a bracketed emotion/delivery direction after the speaker name: act it with that exact feeling and do NOT read the brackets aloud. ' + [roleA, roleB].filter((r) => r !== 'narrator').map((r) => nm[r] + ' is ' + ROLE_EN[r] + (r === 'boy' || r === 'girl' ? ' (use a childlike voice)' : '') + '.').join(' ') + '\n' + items.map((it) => nm[it.role] + (it.emo ? ' [' + it.emo + ']' : '') + ': ' + it.text).join('\n');
-  const r = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/models/' + conf.legacyModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(100000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { multiSpeakerVoiceConfig: { speakerVoiceConfigs: [roleA, roleB].map((ro) => ({ speaker: nm[ro], voiceConfig: { prebuiltVoiceConfig: { voiceName: conf.gv[ro] } } })) } } } }) });
-  if (r.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r); throw e; }
-  if (!r.ok) { const e = new Error('gemini_' + r.status); e.code = 502; throw e; }
-  const b = findAudioB64(await r.json()); if (!b) { const e = new Error('no_audio'); e.code = 502; throw e; }
-  return toWav(b);
-}
 /* ---- تمييز المتكلم بذكاء: نموذج جوجل النصي بيقرا الفقرة (ومعاها اللي قبلها) ويحدد لكل جزء مين بيتكلم: راجل / ست / ولد / بنت ---- */
 const ROLE_ENUM = ['narrator', 'man', 'woman', 'boy', 'girl'];
-async function smartRoles(env, text, conf, ctx) {
-  const base = segmentRoles(text), key = env.GEMINI_API_KEY;
-  if (!conf.smart || !key) return base;
-  try {
-    const list = base.map((r, i) => '[' + i + '] ' + r.text).join('\n');
-    const prompt = 'You are preparing an Arabic (Egyptian) novel for an audiobook with different voices. Below is the text before the excerpt (context only), then the excerpt split into numbered segments in order. '
-      + 'For EACH numbered segment return who speaks it: "narrator" for narration/description (not spoken by a character), or "man", "woman", "boy", "girl" for a character\'s spoken words. '
-      + 'Decide the speaker\'s gender from the clues: names, pronouns, verb forms (قال/قالت, رد/ردت), words like هي/هو/أمه/أبوه/زوجته/زوجها, who is being addressed, and the flow of the conversation (people usually alternate). '
-      + 'Keep each character consistent across the excerpt and the context. A speech tag like "قالت سلمى" belongs to narrator but tells you the speaker of the neighbouring spoken segment. Use boy/girl only for clearly young children. '
-      + 'ALSO act like a director: for EACH segment give "e", a SHORT English performance direction (max 8 words) describing how the speaker feels and sounds right now, taken from the scene and from descriptions such as "قال بغضب", "قالت وهي تبكي", "همس", "صرخ", "ابتسم" (e.g. "furious, shouting through clenched teeth", "trembling, on the verge of tears", "soft, tender whisper", "tense suspenseful narration"). Use "" only if truly neutral. '
-      + 'Return ONLY a JSON array of exactly ' + base.length + ' objects {"r":role,"e":direction}, one per segment, in order.\n\nCONTEXT (before):\n' + String(ctx || '').slice(-600) + '\n\nEXCERPT:\n' + list;
-    const r = await gFetch(env, 'https://generativelanguage.googleapis.com/v1beta/models/' + conf.annModel + ':generateContent', { method: 'POST', signal: AbortSignal.timeout(9000), headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0, thinkingConfig: { thinkingBudget: 0 }, responseMimeType: 'application/json', responseSchema: { type: 'ARRAY', items: { type: 'OBJECT', properties: { r: { type: 'STRING', enum: ROLE_ENUM }, e: { type: 'STRING' } }, required: ['r', 'e'] } } } }) });
-    if (!r.ok) return base;
-    const j = await r.json(), t = (((j.candidates || [])[0] || {}).content || {}).parts; const arr = JSON.parse((t || []).map((x) => x.text || '').join(''));
-    if (!Array.isArray(arr) || arr.length !== base.length || !arr.every((x) => x && ROLE_ENUM.includes(x.r))) return base;
-    const out = []; base.forEach((b, i) => { const role = base[i].role === 'narrator' ? 'narrator' : (arr[i].r === 'narrator' ? base[i].role : arr[i].r); const emo = String(arr[i].e || '').replace(/[\[\]\n]/g, ' ').trim().slice(0, 80); const l = out[out.length - 1]; if (l && l.role === role) { l.text += ' ' + b.text; if (!l.emo) l.emo = emo; } else out.push({ role, text: b.text, emo }); });
-    return out;
-  } catch (e) { return base; }
-}
-function applyDict(runs, conf) { // قاموس النطق: كلمة=كلمة بالتشكيل
-  const pairs = String(conf.dict || '').split('\n').map((l) => { const k = l.indexOf('='); return k > 0 ? [l.slice(0, k).trim(), l.slice(k + 1).trim()] : null; }).filter((x) => x && x[0] && x[1]).sort((a, b) => b[0].length - a[0].length);
-  if (!pairs.length) return runs;
-  // الاستبدال بالكلمة الكاملة (مش جزء من كلمة تانية)، ومسموح حرف سابق (و/ف/ب/ل/ك) للكلمات الطويلة
-  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), L = '\\p{L}\\p{M}';
-  const rx = pairs.map(([a, b]) => [new RegExp('(?<![' + L + '])([وفبلك]?)(' + esc(a) + ')(?![' + L + '])', 'gu'), a, b]);
-  return runs.map((r) => { let t = r.text; for (const [re, a, b] of rx) t = t.replace(re, (m, p) => (p && a.length < 4 && p !== 'و' && p !== 'ف' ? m : p + b)); return { role: r.role, text: t, emo: r.emo }; });
-}
 // تقليل عدد الطلبات لجوجل (حدّها في الدقيقة قليل): الأجزاء القصيرة تتدمج في اللي جنبها، وبحد أقصى 4 طلبات للجزء
 // لما بندمج أجزاء بانفعالات مختلفة منحافظش على الانفعال بتاع كل جزء جوه النص نفسه: [بغضب] كلام... [بهمس] كلام...
-const cueTxt = (r) => (r.emo ? '[' + r.emo + '] ' : '') + r.text;
-const joinCue = (a, b) => ((a.emo || a.tg || b.emo || b.tg) ? { text: (a.tg ? a.text : cueTxt(a)) + ' ' + (b.tg ? b.text : cueTxt(b)), emo: '', tg: true } : { text: a.text + ' ' + b.text, emo: '', tg: false });
-function mergeRuns(runs, maxCalls, minLen = 45) {
-  const out = runs.map((r) => ({ role: r.role, text: r.text, emo: r.emo }));
-  const fold = () => { for (let k = out.length - 1; k > 0; k--) if (out[k].role === out[k - 1].role) { const j = joinCue(out[k - 1], out[k]); out[k - 1] = { role: out[k].role, text: j.text, emo: j.emo, tg: j.tg }; out.splice(k, 1); } };
-  fold();
-  for (;;) {
-    let idx = -1, best = 1e9;
-    out.forEach((r, i) => { const need = out.length > maxCalls ? 1e9 : minLen; if (r.text.length < best && (out.length > maxCalls || r.text.length < need) && out.length > 1) { best = r.text.length; idx = i; } });
-    if (idx < 0) break;
-    const r = out[idx], nb = idx === 0 ? 1 : (idx === out.length - 1 ? idx - 1 : (r.role === 'narrator' ? (out[idx - 1].role !== 'narrator' ? idx - 1 : idx + 1) : (out[idx - 1].text.length <= out[idx + 1].text.length ? idx - 1 : idx + 1)));
-    // الدور الأطول هو اللي بيفضل
-    const keep = out[nb].text.length >= r.text.length ? nb : idx; const other = keep === nb ? idx : nb;
-    const first = Math.min(idx, nb), second = Math.max(idx, nb);
-    const jc = joinCue(out[first], out[second]), role = out[keep].role;
-    out.splice(second, 1); out[first] = { role, text: jc.text, emo: jc.emo, tg: jc.tg }; fold();
-    if (out.length <= 1) break;
-  }
-  return out;
-}
 
 /* ---------- تشكيل الحوار بالنطق المصري (منقول من أداة الرداد): بيتطبّق على كلام الشخصيات بس، والسرد فصحى ---------- */
 function stripDiacritics(str = '') {
@@ -2266,12 +2100,23 @@ const rdScript = (seg, conf) => {
   if ((conf.rd || RD_DEF).humanize && (seg.emotionId === 'fear_whisper' || seg.emotionId === 'crying_sad')) s = s.replace(/\.\./g, '... ');
   return s;
 };
+// تدريب اللهجة: كل شخصية ليها توجيه لهجة مصرية خاص بيها (عشان صوت الشاب مايضيعش في العامية) — بيتزوّد حسب إعداد dialect (0 عادي/1 قوي/2 أقصى)
+const RD_ACC = {
+  young_male: 'a young Cairo guy in his twenties speaking street Egyptian slang (ya basha, ya3ni, khalas, eh da) with a confident casual relaxed rhythm, hard Egyptian G for jeem, glottal stop for qaf, never textbook Arabic',
+  adult_male_dramatic: 'a grown Cairo man speaking authentic Egyptian colloquial with a firm, deep, intense delivery, glottal qaf, hard G for jeem',
+  elder_male: 'an older Cairo man speaking slow, warm, wise baladi Egyptian with a gravelly calm tone, glottal qaf, hard G for jeem',
+  adult_female: 'a Cairo woman speaking natural everyday Egyptian colloquial, expressive, warm and confident, glottal qaf, hard G for jeem',
+  young_female: 'a young Cairo girl speaking lively natural Egyptian colloquial (ya3ni, khalas, eh da), light and playful but never baby-talk, glottal qaf, hard G for jeem',
+  child: 'a little Egyptian child speaking simple cute Egyptian colloquial with childlike rhythm',
+  narrator_male: 'a warm Egyptian storyteller', narrator_female: 'a warm Egyptian storyteller'
+};
+const rdAccent = (persona, conf) => { const lv = ((conf.rd || RD_DEF).dialect); if (lv === 0) return ''; const a = RD_ACC[persona && persona.a] || ''; if (!a) return ''; return ' Speak as ' + a + (lv >= 2 ? '. Egyptian pronunciation must be flawless and consistent in EVERY word, as if a native Egyptian actor born in Cairo is performing this, with Egyptian vowel shapes (e.g. ay for ey, ee/oo not classical diphthongs) and Egyptian sentence melody; do not drift toward Gulf, Levantine or Modern Standard Arabic' : '') + '.'; };
 const RD_CUE = 'in a natural Cairo Egyptian colloquial accent (Masri, never Gulf/Saudi), like a real human in a real conversation: natural breaths, small hesitations, varied pace and pitch, spontaneous and emotionally alive; a steady natural chest voice like an ordinary adult, no vocal breaks or cracking, no breathy or affected effeminate softness, no sing-song; end words with sukun and never pronounce Arabic grammatical case endings (i3raab); never robotic and never like reading text aloud';
 const RD_STY = { angry_shout: ['Say angrily and loudly with intense dramatic emotion', 'Say angrily and loudly with intense dramatic emotion in Arabic'], fear_whisper: ['Say in a frightened, trembling, breathless whisper', 'Say in a frightened, trembling whisper in Arabic'], child_fear: ["Say in a scared, crying little child's voice", "Say in a scared, crying little child's voice in Arabic"], crying_sad: ['Say in a sad, heartbroken, tearful voice', 'Say in a sad, tearful voice in Arabic'], sarcastic_cold: ['Say in a cold, sarcastic, mocking tone', 'Say in a cold, sarcastic tone in Arabic'], shock_surprise: ['Say in a shocked, breathless, astonished tone', 'Say in a shocked, astonished tone in Arabic'], happy_warm: ['Say in a warm, affectionate, reassuring Egyptian tone', 'Say in a warm, affectionate, reassuring tone in Arabic'], dramatic_narrator: ['Say as a warm, intimate human storyteller who lives the story, with natural breaths and pauses', 'Say as a deep, resonant, warm human audiobook storyteller in clear Modern Standard Arabic, unhurried measured pace, meaningful pauses, steady chest voice with no vocal breaks, no breathy or affected softness, never robotic'], natural_dialogue: ['Say naturally', 'Say as a natural, expressive human speaker in clear Modern Standard Arabic, steady chest voice, no vocal breaks or affected softness, natural pauses and intonation, never robotic'] };
 async function rdSpeak(env, seg, persona, conf) { // مقطع واحد بصوت شخصيته — نفس صيغة الأداة الجديدة (جملة إخراج قصيرة + النص) بـ3 محاولات
   const egy = rdEgy(seg, conf), script = rdScript(seg, conf), st = RD_STY[seg.emotionId] || RD_STY.natural_dialogue;
-  const directive = egy ? st[0] + ' ' + RD_CUE : st[1];
-  const cands = egy ? [directive + ': ' + script, 'Say ' + RD_CUE + ': ' + script, script] : [directive + ': ' + script, script, String(seg.text)];
+  const acc = egy ? rdAccent(persona, conf) : '', directive = egy ? st[0] + ' ' + RD_CUE + acc : st[1];
+  const cands = egy ? [directive + ': ' + script, 'Say ' + RD_CUE + acc + ': ' + script, script] : [directive + ': ' + script, script, String(seg.text)];
   const need = String(seg.text).replace(/\s/g, '').length;
   for (const pr of cands) {
     for (let k = 0; k < 2; k++) {
@@ -2289,7 +2134,7 @@ async function rdMega(env, batch, conf) { // الدمج الفائق: لحد 7 �
   const sp = []; batch.forEach((s) => { if (!sp.find((u) => u.tag === s.speaker)) sp.push({ tag: s.speaker, p: rdPers(s.pid) }); });
   const A = sp[0], B = sp[1] || { tag: 'المتحدث_الثاني', p: rdPers('youssef') };
   const lines = batch.map((s) => { const emo = RD_E[s.emotionId] || RD_E.natural_dialogue; return s.speaker + ': (' + emo.l + ' - ' + (s.actingDirection || '') + ') ' + rdScript(s, conf); }).join('\n');
-  const prompt = 'قم بتمثيل هذا المشهد الدرامي المصري ببراعة وواقعية بشرية 100% باللهجة العامية المصرية القاهرية الصميمة (نطق الجيم المصرية غير المعطشة G، وصل الكلمات بنعومة بشرية، والالتزام التام بالتشكيل الصوتي المصري المكتوب دون تحويل أي كلمة للفصحى).' + (((conf.rd || RD_DEF).mode === 'B') && batch.some((s) => s.type === 'narration') ? '\nاستثناء: المتحدث «الراوي» يقرأ سرده باللغة العربية الفصحى السليمة.' : '') + '\nالتزم بالانفعال المكتوب بين القوسين لكل جملة دون أن تنطق الكلام الموجود داخل القوسين ودون نطق أسماء المتحدثين:\n\n' + lines;
+  const accL = sp.map((u) => { const a = rdAccent(u.p, conf); return a ? u.tag + ':' + a : ''; }).filter(Boolean).join(' | '), prompt = 'قم بتمثيل هذا المشهد الدرامي المصري ببراعة وواقعية بشرية 100% باللهجة العامية المصرية القاهرية الصميمة (نطق الجيم المصرية غير المعطشة G، وصل الكلمات بنعومة بشرية، والالتزام التام بالتشكيل الصوتي المصري المكتوب دون تحويل أي كلمة للفصحى).' + (((conf.rd || RD_DEF).mode === 'B') && batch.some((s) => s.type === 'narration') ? '\nاستثناء: المتحدث «الراوي» يقرأ سرده باللغة العربية الفصحى السليمة.' : '') + ''+(accL?'\nتوجيه لهجة كل متحدث (Egyptian accent coaching) — '+accL:'')+'\nالتزم بالانفعال المكتوب بين القوسين لكل جملة دون أن تنطق الكلام الموجود داخل القوسين ودون نطق أسماء المتحدثين:\n\n' + lines;
   const body = JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { multiSpeakerVoiceConfig: { speakerVoiceConfigs: [{ speaker: A.tag, voiceConfig: { prebuiltVoiceConfig: { voiceName: A.p.v } } }, { speaker: B.tag, voiceConfig: { prebuiltVoiceConfig: { voiceName: B.p.v } } }] } } } });
   const need = batch.reduce((a, s) => a + String(s.text).replace(/\s/g, '').length, 0);
   try {
@@ -2320,7 +2165,7 @@ async function rdLearn(env, text, conf) {
     for (const [k, v] of Object.entries(obj)) { const key = stripDiacritics(k); if (typeof v === 'string' && freq[key] && stripDiacritics(v) === key && v !== key && v.length <= key.length * 2 + 4) clean[key] = v; }
     const n = Object.keys(clean).length; if (!n) return 0;
     let cur = {}; try { cur = (await getSetting(env, 'rd_learned')) || {}; } catch (e) {}
-    const merged = { ...cur, ...clean }, keys = Object.keys(merged); if (keys.length > 4000) keys.slice(0, keys.length - 4000).forEach((k) => delete merged[k]);
+    const merged = { ...cur, ...clean }, keys = Object.keys(merged); if (keys.length > 20000) keys.slice(0, keys.length - 20000).forEach((k) => delete merged[k]);
     await setSetting(env, 'rd_learned', merged); RD_LEARN = merged; return n;
   } catch (e) { return 0; }
 }
@@ -2329,7 +2174,7 @@ async function rdLearn(env, text, conf) {
 async function rdLearnMerge(env, clean, src) {
   const n = Object.keys(clean).length; if (!n) return 0;
   let cur = {}; try { cur = (await getSetting(env, 'rd_learned')) || {}; } catch (e) {}
-  const merged = { ...cur, ...clean }, keys = Object.keys(merged); if (keys.length > 6000) keys.slice(0, keys.length - 6000).forEach((k) => delete merged[k]);
+  const merged = { ...cur, ...clean }, keys = Object.keys(merged); if (keys.length > 20000) keys.slice(0, keys.length - 20000).forEach((k) => delete merged[k]);
   await setSetting(env, 'rd_learned', merged); RD_LEARN = merged;
   try { const lg = (await getSetting(env, 'rd_learn_log')) || {}; const arr = (lg.items || []).slice(0, 49); arr.unshift({ at: Date.now(), n, src, w: Object.keys(clean).slice(0, 8) }); await setSetting(env, 'rd_learn_log', { items: arr }); } catch (e) {}
   return n;
@@ -2372,7 +2217,8 @@ async function radadPart(env, text, conf, ctx, nid) {
   let segs = cf.analysis === 'local' ? null : await rdAnalyze(env, text, conf);
   if (segs) build(segs);
   if (!segs || !items.length || (src > 80 && cover() < src * 0.85)) build(rdLocal(text, conf));
-  if (!items.length) return geminiPart(env, text, conf, ctx);
+  if (!items.length) build([{ text, speaker: 'الراوي', type: 'narration' }]);
+  if (!items.length) { const e = new Error('empty_text'); e.code = 400; throw e; }
   if (dirty) { try { await setSetting(env, regKey, reg); } catch (e) {} }
   if (cf.skipNarration) { const keep = items.filter((x) => x.type !== 'narration'); if (keep.length) { items.length = 0; items.push(...keep); } }
   let jobs;
@@ -2384,45 +2230,8 @@ async function radadPart(env, text, conf, ctx, nid) {
   const all = new Int16Array(n); let o = 0; pcms.forEach((p, i) => { if (i) o += gap.length; all.set(applyEdgeFades(p), o); o += p.length; });
   return { wav: pcmToWav(new Uint8Array(all.buffer), 24000), chars: items.reduce((a, x) => a + x.text.length, 0), calls: jobs.length + 1 };
 }
-async function geminiPart(env, text, conf, ctx) { // جزء واحد: أدوار متعددة (حد أقصى متكلمين اثنين في الطلب)
-  const runs = mergeRuns(applyDict(conf.multi ? await smartRoles(env, text, conf, ctx) : [{ role: 'narrator', text: stripMarks(text) }], conf).map((r) => (r.role === 'narrator' || r.tg || conf.phon === false ? r : { ...r, text: egyPhon(r.text) })), conf.econ ? 2 : 4, conf.econ ? 150 : 45), groups = []; let cur = null;
-  for (const r of runs) { if (!cur || (!cur.roles.has(r.role) && cur.roles.size >= (conf.mm ? 2 : 1))) { cur = { roles: new Set(), items: [] }; groups.push(cur); } cur.roles.add(r.role); cur.items.push(r); }
-  const wavs = new Array(groups.length); let chars = 0, nxt = 0;
-  groups.forEach((g) => { chars += g.items.map((x) => x.text).join(' ').length; });
-  const one0 = async (i) => { const g = groups[i], roles = [...g.roles], tgs = g.items.some((x) => x.tg), t = g.items.length > 1 ? g.items.map((x) => (x.tg ? x.text : cueTxt(x))).join(' ') : g.items[0].text;
-    wavs[i] = roles.length === 1 ? await geminiSpeak(env, t, conf.gv[roles[0]], conf, roleStyle(conf, roles[0], g.items.length === 1 && !tgs ? g.items[0].emo : '') + ((tgs || g.items.length > 1) ? '. The text has square-bracket cues: act each cue out exactly with that feeling for the sentences after it, and never read the cue aloud' : '')) : await geminiMulti(env, roles[0], roles[1], g.items, conf); };
-  // حماية من الصوت الناقص: جوجل أحيانًا بترجّع صوت قصير (بيقرا أول سطر/العنوان وبس) — بنقارن المدة بعدد الحروف ونعيد المحاولة
-  const one = async (i) => {
-    const g = groups[i], clean = g.items.map((x) => String(x.text).replace(/\[[^\]]*\]/g, '')).join(' '), need = clean.replace(/\s/g, '').length;
-    for (let k = 0; k < 3; k++) {
-      await one0(i);
-      const secs = Math.max(0, wavs[i].length - 44) / 48000;
-      if (need < 40 || secs >= need / 18) return;
-    }
-    const e = new Error('short_audio'); e.code = 502; e.detail = 'الصوت اللي رجع من جوجل ناقص (قصير عن النص) — هيتعاد'; throw e;
-  };
-  // الأجزاء الصغيرة (الأدوار) بتتحوّل بالتوازي (3 مع بعض) علشان الجزء يخلص قبل ما الوقت يخلص
-  await Promise.all(Array.from({ length: Math.min(3, groups.length) }, async () => { while (nxt < groups.length) { const i = nxt++; await one(i); } }));
-  const wav = joinWavs(wavs); return { wav, chars, calls: groups.length };
-}
 const xmlEsc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-function azureSsml(runs, conf) {
-  const v = conf.az.voices;
-  return '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="ar-EG">' + runs.map((r) => { const o = v[r.role] || v.narrator; return '<voice name="' + xmlEsc(o.v) + '"><prosody rate="' + o.rate + '" pitch="' + o.pitch + '">' + xmlEsc(r.text) + '</prosody></voice>'; }).join('<break time="180ms"/>') + '</speak>';
-}
-async function azureSpeakRuns(env, runs, conf) {
-  const region = azRegion(env, conf);
-  const r = await fetch('https://' + region + '.tts.speech.microsoft.com/cognitiveservices/v1', { method: 'POST', headers: { 'Ocp-Apim-Subscription-Key': env.AZURE_SPEECH_KEY, 'Content-Type': 'application/ssml+xml', 'X-Microsoft-OutputFormat': 'riff-24khz-16bit-mono-pcm', 'User-Agent': 'RadPad' }, body: azureSsml(runs, conf) });
-  if (r.status === 429) { const e = new Error('busy'); e.code = 429; e.detail = await q429(r); throw e; }
-  if (r.status === 401 || r.status === 403) { const e = new Error('azure_key_or_region_wrong'); e.code = 401; throw e; }
-  if (!r.ok) { const e = new Error('azure_' + r.status); e.code = 502; throw e; }
-  const b = new Uint8Array(await r.arrayBuffer()); if (b.length < 100) { const e = new Error('no_audio'); e.code = 502; throw e; } return b;
-}
-async function azurePart(env, text, conf, ctx) {
-  const runs = applyDict(conf.multi ? await smartRoles(env, text, conf, ctx) : [{ role: 'narrator', text: stripMarks(text) }], conf);
-  const wav = await azureSpeakRuns(env, runs, conf); return { wav, chars: runs.reduce((a, r) => a + r.text.length, 0), calls: 1 };
-}
-const speakPart = (env, prov, text, conf, ctx, nid) => (prov === 'azure' ? azurePart(env, text, conf, ctx) : conf.radad !== false ? radadPart(gemEnv(env, prov), text, conf, ctx, nid) : geminiPart(gemEnv(env, prov), text, conf, ctx));
+const speakPart = (env, prov, text, conf, ctx, nid) => radadPart(gemEnv(env, prov), text, conf, ctx, nid);
 const audioResp = (obj, hit) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'private, max-age=86400', 'X-Cache': hit ? 'HIT' : 'MISS' } });
 const CPS = 14; // حروف في الثانية تقريبًا (لتقدير المدة والتكلفة قبل التحويل)
 const hasMk = (t) => /[«“"]/.test(t) || /(^|\n)\s*[-–—]/.test(t);
@@ -2459,8 +2268,8 @@ async function ttsBump(env, prov, cols) {
   const sets = Object.keys(cols).map((k) => k + '=' + k + '+?').join(',');
   await env.DB.prepare('UPDATE tts_use SET ' + sets + ' WHERE day=? AND prov=?').bind(...Object.values(cols), d, prov).run();
 }
-const stKey = (prov) => (prov === 'azure' ? 'tts_state_az' : prov === 'gemini' ? 'tts_state' : prov[0] === 'r' ? 'tts_state_r' + prov.slice(2) : 'tts_state_g' + prov.slice(6));
-const PNAME = { gemini: 'جوجل 1', gemini2: 'جوجل 2', gemini3: 'جوجل 3', gemini4: 'جوجل 4', gemini5: 'جوجل 5', gemini6: 'جوجل 6', rd1: 'الرداد 1', rd2: 'الرداد 2', rd3: 'الرداد 3', rd4: 'الرداد 4', rd5: 'الرداد 5', rd6: 'الرداد 6', azure: 'مايكروسوفت (Azure)' };
+const stKey = (prov) => (prov === 'gemini' ? 'tts_state' : prov[0] === 'r' ? 'tts_state_r' + prov.slice(2) : 'tts_state_g' + prov.slice(6));
+const PNAME = { gemini: 'جوجل 1', gemini2: 'جوجل 2', gemini3: 'جوجل 3', gemini4: 'جوجل 4', gemini5: 'جوجل 5', gemini6: 'جوجل 6', rd1: 'الرداد 1', rd2: 'الرداد 2', rd3: 'الرداد 3', rd4: 'الرداد 4', rd5: 'الرداد 5', rd6: 'الرداد 6' };
 async function ttsAlertAdmins(env, title, text, prov = 'gemini') {
   const key = stKey(prov), st = await getSetting(env, key), now = Date.now();
   if (st.alertAt && now - st.alertAt < 6 * 3600000) return;
@@ -2474,7 +2283,6 @@ async function ttsAlertAdmins(env, title, text, prov = 'gemini') {
   } catch (e) {}
 }
 // الصوت القديم بيفضل زي ما هو (مفيش مسح)؛ الأصوات المتعددة بتشتغل على اللي يتحوّل من دلوقتي
-const ECON_MX = 2000; // وضع التوفير: جزء أكبر = طلبات أقل (الحساب المجاني 10 طلبات في اليوم)
 const TTS_VER = 3;
 async function ttsMigrate(env) {
   const v = await getSetting(env, 'tts_ver'); if (v.v >= TTS_VER) return true;
@@ -2546,15 +2354,12 @@ async function ttsStep0(env, opts = {}) {
   const ch = await env.DB.prepare("SELECT * FROM tts_ch WHERE owner=? AND status='running'").bind(tok).first();
   if (!ch) return { ok: true, idle: 'empty', prov };
   let parts = JSON.parse(ch.parts || '[]');
-  if (conf.radad !== false && ch.done === 0 && parts.length && Math.max(...parts.map((x) => x[1] - x[0])) > rdPartMx(conf) * 1.25) { const np = splitParts(ch.text, rdPartMx(conf)); if (np.length) { parts = np; await env.DB.prepare('UPDATE tts_ch SET parts=?,nparts=? WHERE id=?').bind(JSON.stringify(np), np.length, ch.id).run(); } }
-  if (conf.radad === false && conf.econ && ch.done === 0 && parts.length > 1 && Math.max(...parts.map((x) => x[1] - x[0])) <= 800) { // فصل لسه ما بدأش: نكبّر الأجزاء علشان الطلبات تقل
-    const np = splitParts(ch.text, ECON_MX); if (np.length && np.length < parts.length) { parts = np; await env.DB.prepare('UPDATE tts_ch SET parts=?,nparts=? WHERE id=?').bind(JSON.stringify(np), np.length, ch.id).run(); }
-  }
+  if (ch.done === 0 && parts.length && Math.max(...parts.map((x) => x[1] - x[0])) > rdPartMx(conf) * 1.25) { const np = splitParts(ch.text, rdPartMx(conf)); if (np.length) { parts = np; await env.DB.prepare('UPDATE tts_ch SET parts=?,nparts=? WHERE id=?').bind(JSON.stringify(np), np.length, ch.id).run(); } }
   let done = ch.done, secsTot = ch.secs, made = 0, err = '', hardFail = false, deadKey = false, limMsg = '';
   let learnedN = 0;
-  if (ch.done === 0 && conf.radad !== false && prov !== 'azure' && (conf.rd || RD_DEF).learn !== false) { try { learnedN = await rdLearn(gemEnv(env, prov), ch.text, conf); } catch (e) {} } // تعلّم كلمات الفصل قبل التحويل (مرة واحدة لكل فصل)
+  if (ch.done === 0 && (conf.rd || RD_DEF).learn !== false) { try { learnedN = await rdLearn(gemEnv(env, prov), ch.text, conf); } catch (e) {} } // تعلّم كلمات الفصل قبل التحويل (مرة واحدة لكل فصل)
   const t0 = Date.now();
-  const MADE_MX = conf.radad !== false ? 3 : 8;
+  const MADE_MX = 3;
   while (done < parts.length && Date.now() - t0 < 22000 && made < MADE_MX && used < cap) {
     const idxs = []; for (let k = 0; k < par && done + k < parts.length && made + k < MADE_MX; k++) idxs.push(done + k);
     const res = await Promise.allSettled(idxs.map(async (p) => {
@@ -2568,7 +2373,7 @@ async function ttsStep0(env, opts = {}) {
       const x = res[k];
       if (x.status === 'fulfilled') {
         used += x.value.secs; secsTot += prefix ? x.value.secs : 0; made++;
-        await ttsBump(env, prov, { reqs: x.value.calls || 1, chars: x.value.chars, secs: x.value.secs, cost: prov === 'azure' ? x.value.chars * conf.az.price / 1e6 : ttsCost(x.value.chars, x.value.secs, conf) });
+        await ttsBump(env, prov, { reqs: x.value.calls || 1, chars: x.value.chars, secs: x.value.secs, cost: ttsCost(x.value.chars, x.value.secs, conf) });
         if (prefix) done++;
         learnedN += x.value.learned || 0;
       } else {
@@ -2633,7 +2438,7 @@ async function pubAutoQueue(env, r, nid) { // بيحط فصول الرواية �
   for (const c of results) {
     if (have.has(c.idx) || (rel[c.idx] && rel[c.idx] > now)) continue;
     const text = chapPlain(c.title, c.content).slice(0, 150000); if (!text.includes('\n') && text.length < 120) continue;
-    const parts = splitParts(text, conf.radad !== false ? rdPartMx(conf) : conf.econ ? ECON_MX : 700); if (!parts.length) continue;
+    const parts = splitParts(text, rdPartMx(conf)); if (!parts.length) continue;
     sts.push(env.DB.prepare('INSERT INTO tts_ch (nid,idx,ntitle,ctitle,ord,sig,text,parts,nparts,created,updated,prov) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind(nid, c.idx, String(r.l_title || '').slice(0, 120), String(c.title || '').slice(0, 120), mx + 1, 'pub', text, JSON.stringify(parts), parts.length, now, now, prov)); n++;
   }
   for (let i = 0; i < sts.length; i += 40) await env.DB.batch(sts.slice(i, i + 40));
@@ -2669,7 +2474,7 @@ async function ttsStats(env) {
   const sum = async (prov, where, ...a) => env.DB.prepare('SELECT COALESCE(SUM(reqs),0) AS reqs,COALESCE(SUM(chars),0) AS chars,COALESCE(SUM(secs),0) AS secs,COALESCE(SUM(cost),0) AS cost,COALESCE(SUM(fails),0) AS fails,COALESCE(SUM(limited),0) AS limited FROM tts_use WHERE prov=? AND ' + where).bind(prov, ...a).first();
   const { results: novels } = await env.DB.prepare("SELECT nid,MAX(ntitle) AS title,MIN(ord) AS ord,MAX(prov) AS prov,COUNT(*) AS n,SUM(status='done') AS d,SUM(CASE WHEN status='running' AND lock_until>"+Date.now()+" THEN 1 ELSE 0 END) AS run,SUM(LENGTH(text)) AS chars,SUM(CASE WHEN status='done' THEN 0 ELSE LENGTH(text)*(1.0-done*1.0/(CASE WHEN nparts<1 THEN 1 ELSE nparts END)) END) AS rem FROM tts_ch GROUP BY nid ORDER BY MIN(ord),nid LIMIT 120").all();
   const q = await env.DB.prepare('SELECT prov,status,COUNT(*) AS n FROM tts_ch GROUP BY prov,status').all();
-  const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { ...Object.fromEntries(PROVS.filter(isGoogle).map((p) => [p, !!gemKey(env, p)])), azure: !!(env.AZURE_SPEECH_KEY && azRegion(env, conf)), azureKey: !!env.AZURE_SPEECH_KEY, azureRegion: azRegion(env, conf) }, prov: {}, nkeys: Object.fromEntries(PROVS.filter(isGoogle).map((p) => [p, gKeyList({ GEMINI_API_KEY: gemKey(env, p) }).length])), keys: Object.fromEntries(Object.entries(await savedKeys(env)).map(([p, v]) => [p, v ? 'app' : ''])), prices: pr,
+  const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { ...Object.fromEntries(PROVS.filter(isGoogle).map((p) => [p, !!gemKey(env, p)])) }, prov: {}, nkeys: Object.fromEntries(PROVS.filter(isGoogle).map((p) => [p, gKeyList({ GEMINI_API_KEY: gemKey(env, p) }).length])), keys: Object.fromEntries(Object.entries(await savedKeys(env)).map(([p, v]) => [p, v ? 'app' : ''])), prices: pr,
     chapters: { queued: 0, running: 0, done: 0, failed: 0 }, novels: novels.map((r) => ({ nid: r.nid, title: r.title, ord: r.ord, prov: r.prov, n: r.n, d: r.d || 0, run: r.run || 0, rem: Math.round(r.rem || 0) })) };
   q.results.forEach((r) => (out.chapters[r.status] = (out.chapters[r.status] || 0) + r.n));
   out.hasKey = out.has.gemini;
@@ -2679,10 +2484,7 @@ async function ttsStats(env) {
     const remChars = Math.round(novels.filter((r) => r.prov === prov).reduce((a, r) => a + (r.rem || 0), 0)), remSecs = remChars / CPS;
     const cap = provCapE(env, conf, prov) * 60;
     const o = { last: await getSetting(env, 'tts_last_' + prov), today, month, chapters: ch, pausedUntil: st.pausedUntil || 0, limMsg: st.limMsg || '', limDaily: !!st.limDaily, exhaustedAt: st.exhaustedAt || 0, dailyMin: cap / 60, usedTodayPct: cap ? Math.min(999, Math.round(today.secs / cap * 100)) : 100 };
-    if (prov === 'azure') {
-      o.freeChars = conf.az.freeChars; o.monthPct = conf.az.freeChars ? Math.min(999, Math.round(month.chars / conf.az.freeChars * 100)) : null; o.extraCostMonth = Math.max(0, month.chars - conf.az.freeChars) * conf.az.price / 1e6;
-      o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: remChars * conf.az.price / 1e6, days: cap ? Math.ceil(remSecs / cap) : null };
-    } else {
+    {
       const fm = gcf(conf, prov).freeMin, freeSecs = fm * 60, extraSecs = Math.max(0, today.secs - freeSecs);
       o.freeMin = fm; o.freeUsedPct = freeSecs ? Math.min(999, Math.round(today.secs / freeSecs * 100)) : null; o.extraCostToday = freeSecs ? (extraSecs * 25 * pr.outP) / 1e6 : null;
       o.remain = { chars: remChars, mins: Math.round(remSecs / 60), cost: ttsCost(remChars, remSecs, conf), days: cap ? Math.ceil(remSecs / cap) : null };
@@ -3552,11 +3354,9 @@ async function route(request, env) {
     if (path === '/api/admin/tts' && m === 'PUT') {
       const b = await body(request, 12000), cur = await getTtsConf(env), nm = (v, d) => (/^[A-Za-z0-9._-]{2,60}$/.test(String(v || '')) ? String(v) : d), nu = (v, d, lo, hi) => { const k = Number(v); return v !== '' && v != null && Number.isFinite(k) && k >= lo && k <= hi ? k : d; };
       const gv = { ...cur.gv }; ROLES.forEach((r) => { const v = (b.gv || {})[r] || (r === 'narrator' ? b.voice : ''); if (v) gv[r] = nm(v, gv[r]); });
-      const ba = b.az || {}, az = { region: ba.region != null ? (/^[a-z0-9-]{3,30}$/.test(String(ba.region).trim().toLowerCase()) ? String(ba.region).trim().toLowerCase() : '') : cur.az.region, dailyMin: nu(ba.dailyMin, cur.az.dailyMin, 0, 100000), freeChars: nu(ba.freeChars, cur.az.freeChars, 0, 1e9), price: nu(ba.price, cur.az.price, 0, 1000), concurrency: nu(ba.concurrency, cur.az.concurrency, 1, 8), voices: { ...cur.az.voices } };
-      ROLES.forEach((r) => { const v = (ba.voices || {})[r]; if (v && typeof v === 'object') { const o = { ...cur.az.voices[r] }; if (/^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]{2,40}$/.test(String(v.v || ''))) o.v = String(v.v); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.rate || ''))) o.rate = String(v.rate); if (/^[+-]?\d{1,3}(\.\d)?%$/.test(String(v.pitch || ''))) o.pitch = String(v.pitch); az.voices[r] = o; } });
       await setSetting(env, 'tts', { model: nm(b.model, cur.model), legacyModel: nm(b.legacyModel, cur.legacyModel), style: str(b.style, 200).trim() || cur.style, gv,
         concurrency: nu(b.concurrency, cur.concurrency, 1, 4), dailyMin: nu(b.dailyMin, cur.dailyMin, 0, 100000), freeMin: nu(b.freeMin, cur.freeMin, 0, 100000), priceIn: nu(b.priceIn, cur.priceIn, 0, 1000), priceOut: nu(b.priceOut, cur.priceOut, 0, 1000),
-        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, rebalance: b.rebalance == null ? cur.rebalance : !!b.rebalance, rd: b.rd ? normRd({ ...cur.rd, ...b.rd, archMap: b.rd.archMap || cur.rd.archMap, pers: b.rd.pers || cur.rd.pers }) : cur.rd, radad: b.radad == null ? cur.radad : !!b.radad, engine: b.engine == null ? cur.engine : (b.engine === 'single' ? 'single' : 'mega'), multi: b.multi == null ? cur.multi : !!b.multi, mm: b.mm == null ? cur.mm : !!b.mm, econ: b.econ == null ? cur.econ : !!b.econ, hideListen: b.hideListen == null ? cur.hideListen : !!b.hideListen, listenAll: b.listenAll == null ? cur.listenAll : !!b.listenAll, smart: b.smart == null ? cur.smart : !!b.smart, annModel: nm(b.annModel, cur.annModel), dict: b.dict == null ? cur.dict : String(b.dict).slice(0, 3000), az,
+        defProv: PROVS.includes(b.defProv) ? b.defProv : cur.defProv, novelProv: cur.novelProv, rebalance: b.rebalance == null ? cur.rebalance : !!b.rebalance, rd: b.rd ? normRd({ ...cur.rd, ...b.rd, archMap: b.rd.archMap || cur.rd.archMap, pers: b.rd.pers || cur.rd.pers }) : cur.rd, engine: b.engine == null ? cur.engine : (b.engine === 'single' ? 'single' : 'mega'), hideListen: b.hideListen == null ? cur.hideListen : !!b.hideListen, listenAll: b.listenAll == null ? cur.listenAll : !!b.listenAll, annModel: nm(b.annModel, cur.annModel), dict: b.dict == null ? cur.dict : String(b.dict).slice(0, 3000),
         g2: { dailyMin: nu((b.g2 || {}).dailyMin, cur.g2.dailyMin, 0, 100000), freeMin: nu((b.g2 || {}).freeMin, cur.g2.freeMin, 0, 100000), concurrency: nu((b.g2 || {}).concurrency, cur.g2.concurrency, 1, 4) },
         g3: { dailyMin: nu((b.g3 || {}).dailyMin, cur.g3.dailyMin, 0, 100000), freeMin: nu((b.g3 || {}).freeMin, cur.g3.freeMin, 0, 100000), concurrency: nu((b.g3 || {}).concurrency, cur.g3.concurrency, 1, 4) },
         g4: { dailyMin: nu((b.g4 || {}).dailyMin, cur.g4.dailyMin, 0, 100000), freeMin: nu((b.g4 || {}).freeMin, cur.g4.freeMin, 0, 100000), concurrency: nu((b.g4 || {}).concurrency, cur.g4.concurrency, 1, 4) },
@@ -3569,19 +3369,6 @@ async function route(request, env) {
         r5: { dailyMin: nu((b.r5 || {}).dailyMin, cur.r5.dailyMin, 0, 100000), freeMin: nu((b.r5 || {}).freeMin, cur.r5.freeMin, 0, 100000), concurrency: nu((b.r5 || {}).concurrency, cur.r5.concurrency, 1, 4) },
         r6: { dailyMin: nu((b.r6 || {}).dailyMin, cur.r6.dailyMin, 0, 100000), freeMin: nu((b.r6 || {}).freeMin, cur.r6.freeMin, 0, 100000), concurrency: nu((b.r6 || {}).concurrency, cur.r6.concurrency, 1, 4) } });
       return json({ ok: true, ...(await ttsStats(env)) });
-    }
-    // فحص: السيرفر شايف كام صوت في فصل متخزّن؟
-    if (path === '/api/admin/tts/inspect' && m === 'GET') {
-      const nid = str(url.searchParams.get('nid'), 80), ix = url.searchParams.get('idx');
-      const c = ix != null && ix !== '' ? await env.DB.prepare('SELECT idx,status,prov,text,parts,updated FROM tts_ch WHERE nid=? AND idx=?').bind(nid, parseInt(ix, 10)).first()
-        : await env.DB.prepare("SELECT idx,status,prov,text,parts,updated FROM tts_ch WHERE nid=? ORDER BY (LENGTH(text)-LENGTH(REPLACE(text,'«',''))+LENGTH(text)-LENGTH(REPLACE(text,'-',''))) DESC, idx ASC LIMIT 1").bind(nid).first();
-      if (!c) return fail('الفصل مش في الطابور', 404);
-      const text = c.text, lines = text.split('\n'), dashLines = lines.filter((l) => /^\s*[-–—]/.test(l)).length, quotes = (text.match(/[«"“]/g) || []).length;
-      const runs = segmentRoles(text), roles = {}; runs.forEach((r) => (roles[r.role] = (roles[r.role] || 0) + r.text.length));
-      const parts = JSON.parse(c.parts || '[]'); let multi = 0; const sample = [];
-      parts.forEach((pr) => { const rr = segmentRoles(text.slice(pr[0], pr[1]).trim()), rs = [...new Set(rr.map((r) => r.role))]; if (rs.length > 1) { multi++; if (sample.length < 2) sample.push({ roles: rs, text: text.slice(pr[0], pr[1]).trim().slice(0, 140) }); } });
-      const conf = await getTtsConf(env);
-      return json({ idx: c.idx, status: c.status, prov: c.prov, multiOn: conf.multi, chars: text.length, dashLines, quotes, roles, parts: parts.length, multiParts: multi, sample });
     }
     // فحص الفصول المحوّلة وهي أقصر من N ثانية (غالبًا اتحوّل العنوان بس) وحذفها من الطابور علشان الموقع يبعتها تاني بنصها الكامل
     if (path === '/api/admin/tts/fix-short' && m === 'POST') {
@@ -3611,7 +3398,7 @@ async function route(request, env) {
         const nid = str(it.nid, 80), ix = parseInt(it.idx, 10), text = String(it.text || '').slice(0, 150000).trim(), sig = str(it.sig, 40);
         if (!nid || !(ix >= 0 && ix < 5000)) { skipped++; continue; }
         if (!text.includes('\n') && text.length < 120) { skipped++; continue; } // عنوان بس من غير نص الفصل: ما نحوّلوش
-        const parts = splitParts(text, conf.radad !== false ? rdPartMx(conf) : conf.econ ? ECON_MX : 700); if (!parts.length) { skipped++; continue; }
+        const parts = splitParts(text, rdPartMx(conf)); if (!parts.length) { skipped++; continue; }
         const ntitle = str(it.ntitle, 120), ctitle = str(it.ctitle, 120); let ord = Math.max(-1e9, Math.min(1e9, parseInt(it.ord, 10) || 0));
         const ex = await env.DB.prepare('SELECT id,sig,prov,text,nparts,status FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
         const sib = await env.DB.prepare('SELECT prov,MIN(ord) AS o FROM tts_ch WHERE nid=?').bind(nid).first(), prov = conf.novelProv[nid] || (sib && sib.prov) || conf.defProv;
@@ -3685,21 +3472,14 @@ async function route(request, env) {
     // تجربة الصوت بنص فيه راوي وراجل وست وطفل (بالمزوّد المطلوب)
     if (path === '/api/admin/tts/test' && m === 'POST') {
       const b = await body(request, 3000), conf = await getTtsConf(env), prov = normProv(b.prov);
-      if (!provReady({ ...env, TTS_BUCKET: env.TTS_BUCKET || {} }, conf, prov)) return fail(prov === 'azure' ? 'مفتاح Azure أو المنطقة (Region) ناقصين' : ('مفتاح ' + PNAME[prov] + ' مش متسجّل — حطه من تابة الحساب ده'), 503);
+      if (!provReady({ ...env, TTS_BUCKET: env.TTS_BUCKET || {} }, conf, prov)) return fail(('مفتاح ' + PNAME[prov] + ' مش متسجّل — حطه من تابة الحساب ده'), 503);
       const text = str(b.text, 600).trim() || 'دخل أحمد الغرفة وقال بصوت هادي: «صباح الخير يا سلمى». ابتسمت سلمى وردت: «صباح النور يا أستاذ أحمد». ثم جرى الصغير نحوهما وقال بفرحة: «بابا، بابا، شوف الرسمة!»';
       const o = await speakPart(env, prov, text, conf), secs = Math.max(0, o.wav.length - 44) / 48000;
-      await ttsBump(env, prov, { reqs: o.calls || 1, chars: o.chars, secs, cost: prov === 'azure' ? o.chars * conf.az.price / 1e6 : ttsCost(o.chars, secs, conf) });
+      await ttsBump(env, prov, { reqs: o.calls || 1, chars: o.chars, secs, cost: ttsCost(o.chars, secs, conf) });
       return audioResp(o.wav, false);
     }
     if (path === '/api/admin/tts/voices' && m === 'GET') {
       const prov = normProv(url.searchParams.get('prov')), conf = await getTtsConf(env), gkey = gemKey(env, prov);
-      if (prov === 'azure') {
-        if (!env.AZURE_SPEECH_KEY || !azRegion(env, conf)) return fail('مفتاح Azure أو المنطقة (Region) ناقصين', 503);
-        const r = await fetch('https://' + azRegion(env, conf) + '.tts.speech.microsoft.com/cognitiveservices/voices/list', { headers: { 'Ocp-Apim-Subscription-Key': env.AZURE_SPEECH_KEY } });
-        const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
-        const list = Array.isArray(j) ? j.filter((v) => /^ar-/.test(v.Locale || '')).map((v) => ({ name: v.ShortName, lang: v.Locale, gender: v.Gender })) : [];
-        return json({ ok: r.ok, status: r.status, voices: list, raw: list.length ? undefined : t.slice(0, 400) });
-      }
       if (!gkey) return fail('مفتاح Gemini مش متحط على السيرفر', 503);
       const r = await gFetch(gemEnv(env, prov), 'https://generativelanguage.googleapis.com/v1beta/voices?pageSize=200', { headers: { 'x-goog-api-key': gkey } });
       const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch (e) {}
@@ -3905,6 +3685,15 @@ async function route(request, env) {
     if (path === '/api/admin/rd/learn-word' && m === 'POST') { const b = await body(request, 2000); const key = stripDiacritics(String(b.word || '')).trim(), v = String(b.pron || '').trim(); if (!key || /\s/.test(key) || stripDiacritics(v) !== key) return fail('التشكيل لازم يكون على نفس حروف الكلمة', 400); await rdLearnMerge(env, { [key]: v }, 'manual'); return json({ ok: true }); }
     if (path === '/api/admin/rd/learned' && m === 'GET') { const d = (await getSetting(env, 'rd_learned')) || {}, lg = (await getSetting(env, 'rd_learn_log')) || {}; const k = Object.keys(d); return json({ total: k.length, words: k.slice(-60).reverse().map((w) => [w, d[w]]), log: lg.items || [], stat: await getSetting(env, 'rd_learn_stat') }); }
     if (path === '/api/admin/rd/learned' && m === 'DELETE') { const b = await body(request, 2000); const d = (await getSetting(env, 'rd_learned')) || {}; delete d[String(b.word || '')]; await setSetting(env, 'rd_learned', d); RD_LEARN = d; return json({ ok: true }); }
+    if (path === '/api/admin/rd/learned-export' && m === 'GET') { const d = (await getSetting(env, 'rd_learned')) || {}; return json({ total: Object.keys(d).length, words: d }); }
+    if (path === '/api/admin/rd/learned-import' && m === 'POST') { const b = await body(request, 2000000), clean = {}; Object.entries((b && b.words) || {}).forEach(([k, v]) => { const key = stripDiacritics(String(k)); if (key && !/\s/.test(key) && typeof v === 'string' && v !== key && stripDiacritics(v) === key && v.length <= key.length * 2 + 4) clean[key] = v; }); const n = await rdLearnMerge(env, clean, 'import'); return json({ n }); }
+    if (path === '/api/admin/rd/sample' && m === 'POST') {
+      const b = await body(request, 2000), conf = await getTtsConf(env); RD_CF = conf.rd || RD_DEF; const pr = rdPers(String(b.pid || 'kareem'));
+      const SAM = { young_male: 'يا عم هو أنا قلتلك إيه؟ خلاص بقى، ماتقلقش، أنا هجيبه لحد عندك النهارده.', adult_male_dramatic: 'اسمعني كويس، اللي حصل مش هيعدي كده، وأنا مش هسكت.', elder_male: 'يا ابني الدنيا مش زي ما انت فاكر، والصبر ده حلو أوي.', adult_female: 'والله يا حبيبتي أنا مستنياكي من بدري، تعالي نقعد ونتكلم.', young_female: 'إيه ده بجد؟ مش مصدقة! تعالي بسرعة أحكيلك اللي حصل.', child: 'ماما، أنا جعان أوي، هو مفيش أكل؟', narrator_male: 'وفي تلك الليلة، هبّت الريح على المدينة، وكان كل شيء ينذر بما هو آتٍ.', narrator_female: 'وفي تلك الليلة، هبّت الريح على المدينة، وكان كل شيء ينذر بما هو آتٍ.' };
+      const text = String(b.text || SAM[pr.a] || SAM.adult_male_dramatic).slice(0, 300), narr = /^narrator/.test(pr.a);
+      try { const sp = PROVS.find((x) => isGoogle(x) && gemKey(env, x)) || 'gemini', pcm = await rdSpeak(gemEnv(env, sp), { text, type: narr ? 'narration' : 'dialogue', emotionId: 'natural_dialogue' }, pr, { ...conf, rd: RD_CF }); return new Response(pcmToWav(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength), 24000), { headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store' } }); }
+      catch (e) { return fail(e.detail || e.message || 'فشل', e.code || 502); }
+    }
     if (path === '/api/admin/pubflow' && m === 'GET') return json({ conf: normPub(await getSetting(env, 'pubflow')), learn: await getSetting(env, 'rd_learn_stat') });
     if (path === '/api/admin/pubflow' && m === 'PUT') { const b = await body(request); const c = normPub(b); await setSetting(env, 'pubflow', c); return json({ conf: c }); }
     if ((g = /^\/api\/admin\/novels\/(\d+)\/narrator$/.exec(path))) { // جنس الراوي للرواية كلها: m = كريم، f = سلمى
