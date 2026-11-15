@@ -332,13 +332,13 @@ async function notifyAdmins(env, who, title, text, ref = 'ordadm') {
 /* ---------- الصوت المصري: Gemini + Azure — طابور لكل مزوّد + أصوات متعددة + تخزين R2 + متابعة التكلفة ---------- */
 const ROLES = ['narrator', 'man', 'woman', 'boy', 'girl'];
 const G_VOICES = { narrator: 'Charon', man: 'Orus', woman: 'Kore', boy: 'Puck', girl: 'Leda' };
-const RD_DEF = { mode: 'B', skipNarration: false, humanize: true, pauseMs: 380, batch: 7, autoWait: true, waitSec: 16, narrator: 'kareem', archMap: {}, pers: {}, analysis: 'ai', anaModel: 'gemini-3-flash-preview', partChars: 0, dialect: 2, human: 2 };
+const RD_DEF = { mode: 'B', skipNarration: false, humanize: true, pauseMs: 380, batch: 7, autoWait: true, waitSec: 16, narrator: 'kareem', archMap: {}, pers: {}, analysis: 'ai', anaModel: 'gemini-3-flash-preview', partChars: 0, dialect: 2, human: 1 };
 function normRd(x) { // كل إعدادات أداة الرداد (كلها بتتغيّر من الأدمن؛ الافتراضي = اللي كان شغال)
   x = x && typeof x === 'object' ? x : {}; const num = (v, d, lo, hi) => (v == null || v === '' || isNaN(+v) ? d : Math.max(lo, Math.min(hi, +v)));
   const ids = RD_P.map((p) => p.id), am = {}, ps = {};
   Object.entries(x.archMap || {}).forEach(([k, v]) => { if (ids.includes(v) && /^[a-z_]{2,40}$/.test(k)) am[k] = v; });
   Object.entries(x.pers || {}).forEach(([k, v]) => { if (ids.includes(k) && v) ps[k] = { v: /^[A-Za-z]{3,24}$/.test(v.v || '') ? v.v : '', p: +v.p ? num(v.p, 0, 0.7, 1.4) : 0 }; });
-  return { mode: ['A', 'B', 'C'].includes(x.mode) ? x.mode : 'B', analysis: x.analysis === 'local' ? 'local' : 'ai', skipNarration: x.skipNarration === true, humanize: x.humanize !== false, pauseMs: num(x.pauseMs, 380, 0, 3000), batch: Math.round(num(x.batch, 7, 1, 10)), autoWait: x.autoWait !== false, waitSec: Math.round(num(x.waitSec, 16, 0, 60)), narrator: ids.includes(x.narrator) ? x.narrator : 'kareem', archMap: am, pers: ps, anaModel: /^[a-z0-9.\-]{4,60}$/i.test(x.anaModel || '') ? x.anaModel : 'gemini-3-flash-preview', partChars: Math.round(num(x.partChars, 0, 0, 3000)), learn: x.learn !== false, dialect: Math.round(num(x.dialect, 2, 0, 2)), human: Math.round(num(x.human, 2, 0, 2)) };
+  return { mode: ['A', 'B', 'C'].includes(x.mode) ? x.mode : 'B', analysis: x.analysis === 'local' ? 'local' : 'ai', skipNarration: x.skipNarration === true, humanize: x.humanize !== false, pauseMs: num(x.pauseMs, 380, 0, 3000), batch: Math.round(num(x.batch, 7, 1, 10)), autoWait: x.autoWait !== false, waitSec: Math.round(num(x.waitSec, 16, 0, 60)), narrator: ids.includes(x.narrator) ? x.narrator : 'kareem', archMap: am, pers: ps, anaModel: /^[a-z0-9.\-]{4,60}$/i.test(x.anaModel || '') ? x.anaModel : 'gemini-3-flash-preview', partChars: Math.round(num(x.partChars, 0, 0, 3000)), learn: x.learn !== false, dialect: Math.round(num(x.dialect, 2, 0, 2)), human: Math.round(num(x.human, 1, 0, 2)) };
 }
 const TTS_DEFAULT = { model: 'gemini-3.8-flash-tts', legacyModel: 'gemini-2.5-flash-preview-tts', style: 'warm, expressive audiobook narration in natural Egyptian Arabic', concurrency: 2, dailyMin: 20, freeMin: 0, priceIn: 0, priceOut: 0,
   gv: G_VOICES, defProv: 'gemini', novelProv: {} };
@@ -1507,7 +1507,7 @@ const egyPhon = (t) => { try { return applyEgyptianPhonetics(String(t || '')); }
 const RD_P = [{"id": "kareem", "v": "Charon", "n": "كريم", "a": "narrator_male", "p": 0.95, "i": "deep, resonant, rich baritone (rakheem) storyteller voice, warm and unhurried"}, {"id": "tarek", "v": "Fenrir", "n": "طارق", "a": "adult_male_dramatic", "p": 1.0, "i": "intense dramatic male voice"}, {"id": "youssef", "v": "Puck", "n": "يوسف", "a": "young_male", "p": 1.02, "i": "lively young male voice"}, {"id": "mahmoud", "v": "Algenib", "n": "محمود", "a": "elder_male", "p": 0.9, "i": "mature calm older male voice"}, {"id": "noor", "v": "Kore", "n": "نور", "a": "adult_female", "p": 1.05, "i": "warm expressive young female voice"}, {"id": "salma", "v": "Sulafat", "n": "سلمى", "a": "narrator_female", "p": 1.02, "i": "confident clear female voice"}, {"id": "layla", "v": "Zephyr", "n": "ليلى", "a": "young_female", "p": 1.08, "i": "soft gentle young female voice"}, {"id": "adam_child", "v": "Leda", "n": "طفل", "a": "child", "p": 1.18, "i": "youthful high-pitched child voice"}];
 const RD_I = {"normal": {"l": "عادي", "b": "بأداء تمثيلي طبيعي ومتوازن"}, "strong": {"l": "قوي", "b": "بانفعال قوي وواضح جداً في نبرة الصوت"}, "max": {"l": "أقصى انفعال 🔥", "b": "بأقصى درجات الانفعال التمثيلي الحقيقي من قلب الحدث كأن المشهد حقيقي تماماً"}};
 const RD_E = {"angry_shout": {"l": "غاضب ويصرخ بشدة", "m": "انفعال شديد وغضب عارم وصوت مرتفع حاد كأنك تصرخ في مواجهة حقيقية بكل قوة", "e": "انفعال مصري شديد جداً وغضب عارم وصوت عالي وحاد ومنفعل كأنك بتصرخ بجد في خناقة ومواجهة عنيفة"}, "fear_whisper": {"l": "خائفة وتهمس بارتجاف", "m": "خوف شديد وصوت هامس مرتجف وأنفاس متلاحقة متوترة تكاد تُسمع من شدة الرعب", "e": "خوف ورعب حقيقي وصوت مصري واطي مهموس ومرتجف وبيترعش مع نهجان خفيف كأنها مرعوبة بجد"}, "child_fear": {"l": "يبكي بذعر وخوف (طفل)", "m": "صوت طفل صغير بريء يتحدث بطبقة رفيعة وبنبرة خائفة باكية تستنجد بوالدها", "e": "صوت طفل مصري صغير بيعيط ومذعور وخايف أوي وبيستنجد بمامته أو باباه بنبرة طفولية باكية"}, "crying_sad": {"l": "حزين ومنكسر / يبكي", "m": "حزن عميق وصوت مختنق بالدموع والبكاء والرجاء المؤثر", "e": "صوت مصري حزين جداً ومكسور ومخنوق بالدموع والعياط والوجع كأنه بيعيط بجد"}, "sarcastic_cold": {"l": "ساخر ومتهكم ببرود", "m": "برود قاتل وسخرية لاذعة وثقة مستفزة مع نبرة تهديد خفية", "e": "برود أعصاب وسخرية مصرية لاذعة وتهكم واستفزاز وثقة عالية في الكلام مع نبرة تهديد هادية"}, "shock_surprise": {"l": "مصدوم ومذهول", "m": "صدمة مفاجئة وذهول وعدم تصديق مع شهقة خفيفة وتقطع في الأنفاس", "e": "صدمة كبيرة وذهول مصري وعدم تصديق من المفاجأة"}, "happy_warm": {"l": "فرحان، دافئ، أو حنون", "m": "سعادة غامرة وحماس ودفء عاطفي وابتسامة واضحة في نبرة الصوت", "e": "حنان ودفا مصري وطمأنينة أو فرحة كبيرة في الكلام"}, "dramatic_narrator": {"l": "سرد درامي مشوق", "m": "سرد روائي سينمائي عميق ومتزن يبني التشويق الدرامي ويهيئ المستمع للمشهد", "e": "سرد حكواتي مصري سلس وعميق ومشوق بلهجة مصرية رصينة وطبيعية بدون تكلف"}, "natural_dialogue": {"l": "هادئ وحازم / طبيعي", "m": "نبرة حوارية طبيعية وواضحة وحازمة بهدوء", "e": "كلام مصري قاهري طبيعي وتلقائي وحازم زي كلام المصريين في الحقيقة بالظبط"}};
-const RD_SYS = "أنت مخرج دراما إذاعية مصري خبير في اللهجة العامية المصرية القاهرية والمصطلحات الشعبية والتمثيل الصوتي البشري.\nمهمتك: تحليل الفصل الروائي وتقسيمه بالترتيب إلى مقاطع (سرد للراوي + حوارات الشخصيات) مع كتابة التشكيل الصوتي المصري المتصل (phoneticText) لكل جملة بحيث ينطقها الممثل كإنسان مصري حقيقي بدون أي أخطاء!\nاجعل الحوار بالعامية المصرية والسرد باللغة العربية الفصحى.\n\nقواعد الذاكرة الذاتية والمصطلحات المصرية المدربة (يجب الالتزام بها حرفياً وعدم الخطأ فيها أبداً):\n[]\n\nقواعد حاسمة جداً للمصطلحات والأوزان الصرفية المصرية:\n1. انتبه للمصطلحات الشعبية المصرية التي تختلف حركاتها عن الفصحى:\n   - «رقبتي سدّادة» تُشكّل صوتياً بالمصري: «رَقَبْتِي سَدَّادَه» (بفتح السين وتشديد الدال على وزن فَعَّالَه، وتسكين الباء في رَقَبْتِي، وإياك أن تكتبها سِدادة بالكسر!).\n   - «دمي محروق» ⬅️ «دَمِّي مَحْرُوق»، «حقك عليا» ⬅️ «حَقَّك عَلَيَّا»، «مليش نفس» ⬅️ «مَالِيش نِفْس» (بكسر النون في نِفْس)، «على عيني وراسي» ⬅️ «عَلَى عِينِي وَرَاسِي».\n2. عندما تقرأ سرداً يمهد للحوار مثل: «انفعل «أحمد» بشدة وصرخ وهو يقول بغضب: - أنت إزاي تعمل فيا كدا!»:\n   - السطر الأول هو سرد للراوي (speaker: \"الراوي\", type: \"narration\", emotionId: \"dramatic_narrator\").\n   - السطر الثاني هو بصوت شخصية «أحمد» (speaker: \"أحمد\", type: \"dialogue\") وانفعاله هو الغضب الشديد والصراخ (emotionId: \"angry_shout\")، ودرجة حدة الانفعال هي القصوى (intensity: \"max\").\n3. اكتب «والله» في العامية المصرية هكذا: «وَاللَّاهِي»، واكتب التاء المربوطة عند الوقف بالهاء الصوتية «ه» (مثل: سَدَّادَه، كِفَايَه، خَايْفَه).\n4. اختر speakerArchetype من القيم التالية فقط:\n   - \"narrator_male\" | \"adult_male_dramatic\" | \"young_male\" | \"elder_male\" | \"adult_female\" | \"narrator_female\" | \"young_female\" | \"child\"\n5. اختر emotionId من القيم التالية فقط:\n   - \"angry_shout\" | \"fear_whisper\" | \"child_fear\" | \"crying_sad\" | \"sarcastic_cold\" | \"shock_surprise\" | \"happy_warm\" | \"dramatic_narrator\" | \"natural_dialogue\"\n6. اختر intensity من القيم التالية فقط:\n   - \"normal\" | \"strong\" | \"max\"";
+const RD_SYS = "أنت مخرج دراما إذاعية مصري خبير في اللهجة العامية المصرية القاهرية والمصطلحات الشعبية والتمثيل الصوتي البشري.\nمهمتك: تحليل الفصل الروائي وتقسيمه بالترتيب إلى مقاطع (سرد للراوي + حوارات الشخصيات) مع كتابة التشكيل الصوتي المصري المتصل (phoneticText) لكل جملة بحيث ينطقها الممثل كإنسان مصري حقيقي بدون أي أخطاء!\nاجعل الحوار بالعامية المصرية والسرد باللغة العربية الفصحى.\n\nقواعد الذاكرة الذاتية والمصطلحات المصرية المدربة (يجب الالتزام بها حرفياً وعدم الخطأ فيها أبداً):\n[]\n\nقواعد حاسمة جداً للمصطلحات والأوزان الصرفية المصرية:\n1. انتبه للمصطلحات الشعبية المصرية التي تختلف حركاتها عن الفصحى:\n   - «رقبتي سدّادة» تُشكّل صوتياً بالمصري: «رَقَبْتِي سَدَّادَه» (بفتح السين وتشديد الدال على وزن فَعَّالَه، وتسكين الباء في رَقَبْتِي، وإياك أن تكتبها سِدادة بالكسر!).\n   - «دمي محروق» ⬅️ «دَمِّي مَحْرُوق»، «حقك عليا» ⬅️ «حَقَّك عَلَيَّا»، «مليش نفس» ⬅️ «مَالِيش نِفْس» (بكسر النون في نِفْس)، «على عيني وراسي» ⬅️ «عَلَى عِينِي وَرَاسِي».\n2. عندما تقرأ سرداً يمهد للحوار مثل: «انفعل «أحمد» بشدة وصرخ وهو يقول بغضب: - أنت إزاي تعمل فيا كدا!»:\n   - السطر الأول هو سرد للراوي (speaker: \"الراوي\", type: \"narration\", emotionId: \"dramatic_narrator\").\n   - السطر الثاني هو بصوت شخصية «أحمد» (speaker: \"أحمد\", type: \"dialogue\") وانفعاله هو الغضب الشديد والصراخ (emotionId: \"angry_shout\")، ودرجة حدة الانفعال هي القصوى (intensity: \"max\").\n3. اكتب «والله» في العامية المصرية هكذا: «وَاللَّاهِي»، واكتب التاء المربوطة عند الوقف بالهاء الصوتية «ه» (مثل: سَدَّادَه، كِفَايَه، خَايْفَه).\n4. اختر speakerArchetype من القيم التالية فقط:\n   - \"narrator_male\" | \"adult_male_dramatic\" | \"young_male\" | \"elder_male\" | \"adult_female\" | \"narrator_female\" | \"young_female\" | \"child\"\n5. اختر emotionId من القيم التالية فقط:\n   - \"angry_shout\" | \"fear_whisper\" | \"child_fear\" | \"crying_sad\" | \"sarcastic_cold\" | \"shock_surprise\" | \"happy_warm\" | \"dramatic_narrator\" | \"natural_dialogue\"\n6. اختر intensity من القيم التالية فقط:\n   - \"normal\" | \"strong\" | \"max\"\n7. افهم من سياق الحوار مين بيكلم مين (المتكلم والمخاطَب وجنس كل واحد منهم) وراعِ صيغة المذكر والمؤنث في كل كلمة: المخاطَب الرجل = إنتَ / عليك / معاك / ليك / اسمع، والمخاطَبة الست = إنتِ / عليكي / معاكي / ليكي / اسمعي، وكلام المتكلم عن نفسه يتبع جنسه هو. لو في النص المكتوب غلط واضح في الصيغة بالنسبة للسياق صححه، ولو مش متأكد سيب الكلمة زي ما هي. ممنوع تضيف أو تحذف أو تغيّر أي كلمة أو معنى غير كده، وممنوع تكرر أي كلمة.";
 function detectLineDialect(line) {
   const cleanLine = stripDiacritics(line);
   const egyMarkers = /(إزاي|ازاي|كدا|كده|أوي|اوي|مكنش|مكانش|مفيش|عشان|علشان|بتاع|اللي|إيه|ايه|عايز|عاوز|يلا|بقى|ليه|احنا|إحنا|ده|دي|دول|دلوقتي|حاجة|فيا|جمبك|معاك|تاني|بس|أكتر|غصب|هما|هددوني|خايف|متخافش|تفتكر|تخبي|ورا|محدش|هيكتشف|كفاية|تمن|رقبتي|سدادة|مليش)/;
@@ -1768,62 +1768,28 @@ function inferAddressee(speaker, contextLine = '', registry = {}, lastOtherSpeak
   return null;
 }
 
-/** يحوّل ضمائر وأفعال المخاطَب في الحوار المصري لصيغة المؤنث أو المذكر حسب جنس المخاطَب */
+/** ضبط صيغة المخاطَب (مذكر/مؤنث) — بيغيّر بس كلمات المخاطَب الصريحة (إنت/عليك/معاك/ليك/أوامر…) ومبيلمسش كلام المتكلم عن نفسه ولا الغائب */
+const RD_DI = '[\\u064B-\\u0652\\u0670]*', RD_AR = '\\u0621-\\u064A';
+const rdWord = (w) => new RegExp('(?<![' + RD_AR + '])([وف]?)' + [...w].map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join(RD_DI) + RD_DI + '(?![' + RD_AR + '])', 'g');
+const RD_F2M = [['إنتي', 'إنتَ'], ['انتي', 'إنتَ'], ['أنتي', 'أنتَ'], ['إنتِ', 'إنتَ'], ['انتِ', 'إنتَ'], ['أنتِ', 'أنتَ'], ['عليكي', 'عليك'], ['معاكي', 'معاك'], ['ليكي', 'ليك'], ['منكي', 'منك'], ['فيكي', 'فيك'], ['عندكي', 'عندك'], ['وراكي', 'وراك'], ['قدامكي', 'قدامك'], ['جنبكي', 'جنبك'], ['حواليكي', 'حواليك'], ['خليكي', 'خليك'], ['اسمعي', 'اسمع'], ['شوفي', 'شوف'], ['ارجعي', 'ارجع'], ['افتحي', 'افتح'], ['اقعدي', 'اقعد'], ['متقوليش', 'متقولش'], ['متخافيش', 'متخافش'], ['متزعليش', 'متزعلش'], ['متعمليش', 'متعملش'], ['متبكيش', 'متبكش'], ['متروحيش', 'متروحش'], ['متسيبيش', 'متسيبش'], ['بتعملي', 'بتعمل'], ['بتقولي', 'بتقول'], ['بتروحي', 'بتروح'], ['بتحبي', 'بتحب'], ['بتفكري', 'بتفكر'], ['بتعرفي', 'بتعرف'], ['بتشوفي', 'بتشوف'], ['بتسمعي', 'بتسمع'], ['بتفهمي', 'بتفهم'], ['هتعملي', 'هتعمل'], ['هتقولي', 'هتقول'], ['هتروحي', 'هتروح']];
+const RD_M2F = [['إنت', 'إنتِ'], ['انت', 'إنتِ'], ['أنت', 'أنتِ'], ['عليك', 'عليكي'], ['معاك', 'معاكي'], ['ليك', 'ليكي'], ['فيك', 'فيكي'], ['عندك', 'عندكي'], ['وراك', 'وراكي'], ['قدامك', 'قدامكي'], ['جنبك', 'جنبكي'], ['خليك', 'خليكي'], ['اسمع', 'اسمعي'], ['شوف', 'شوفي'], ['متقولش', 'متقوليش'], ['متخافش', 'متخافيش'], ['متزعلش', 'متزعليش'], ['متعملش', 'متعمليش'], ['متبكش', 'متبكيش']];
+const RD_PRED = '(?:عايز|عاوز|فاهم|متأكد|جاهز|مبسوط|زعلان|تعبان|خايف|عارف|مصدق|متخيل|فاكر|موافق|مستعد|جعان|عطشان|مرهق|قلقان|متعصب|مصمم|مش فاهم)';
+const RD_RE = { f2m: RD_F2M.map(([a, b]) => [rdWord(a), b]), m2f: RD_M2F.map(([a, b]) => [rdWord(a), b]),
+  p2: new RegExp('((?:إنت|انت|أنت|إنتِ|انتي|إنتي|أنتي)' + RD_DI + '\\s+(?:مش\\s+|لسه\\s+|لسة\\s+)?)(' + RD_PRED.slice(3, -1) + ')(ة?)(?![' + RD_AR + '])', 'g'),
+  p1: new RegExp('((?:أنا|انا)' + RD_DI + '\\s+(?:مش\\s+|لسه\\s+|لسة\\s+)?)(' + RD_PRED.slice(3, -1) + ')(ة?)(?![' + RD_AR + '])', 'g') };
+/** addrG/selfG: 'm' | 'f' | '' — مفيش تعديل لو الجنس مش معروف بثقة */
+function rdFixGender(text, addrG, selfG) {
+  let out = String(text || ''); if (!out) return out;
+  const pred = (re, g) => { out = out.replace(re, (m, pre, w) => pre + w + (g === 'f' ? 'ة' : '')); };
+  if (addrG === 'f') { for (const [re, to] of RD_RE.m2f) out = out.replace(re, (m, pf) => pf + to); pred(RD_RE.p2, 'f'); }
+  else if (addrG === 'm') { for (const [re, to] of RD_RE.f2m) out = out.replace(re, (m, pf) => pf + to); pred(RD_RE.p2, 'm'); }
+  if (selfG === 'f' || selfG === 'm') pred(RD_RE.p1, selfG);
+  return out;
+}
 function adaptDialogueToAddressee(text, addresseeCategory) {
   if (!text || !addresseeCategory) return text;
-  const isFem = addresseeCategory === 'امرأة';
-  const isMasc = addresseeCategory === 'رجل' || addresseeCategory === 'رجل مسن';
-  if (!isFem && !isMasc) return text;
-
-  const AR = '\u0621-\u064A';
-  const W = (w) => new RegExp('(?<![' + AR + '])' + w + '(?![' + AR + '])', 'g');
-  let out = text;
-
-  if (isFem) {
-    out = out
-      .replace(W('إنتَ|انت|إنت|أنت'), 'إنتِ')
-      .replace(W('عليك'), 'عليكي')
-      .replace(W('معاك'), 'معاكي')
-      .replace(W('عندك'), 'عندِك')
-      .replace(W('ليك'), 'ليكي')
-      .replace(W('منك'), 'منِّك')
-      .replace(W('بتعمل'), 'بتعملي')
-      .replace(W('بتقول'), 'بتقولي')
-      .replace(W('بتروح'), 'بتروحي')
-      .replace(W('بتحب'), 'بتحبي')
-      .replace(W('بتفكر'), 'بتفكري')
-      .replace(W('عايز'), 'عايزة')
-      .replace(W('عاوز'), 'عاوزة')
-      .replace(W('فاهم'), 'فاهمة')
-      .replace(W('مصدقني'), 'مصدقاني')
-      .replace(W('متقولش'), 'متقوليش')
-      .replace(W('متخافش'), 'متخافيش')
-      .replace(W('متزعلش'), 'متزعليش')
-      .replace(W('خليك'), 'خليكي')
-      .replace(W('اسمع'), 'اسمعي')
-      .replace(W('بص'), 'بُصّي')
-      .replace(W('شوف'), 'شوفي')
-      .replace(W('تعالى'), 'تعالي')
-      .replace(W('استنى'), 'استني');
-  } else {
-    out = out
-      .replace(W('إنتِ|انتي|إنتي|أنتِ'), 'إنتَ')
-      .replace(W('عليكي'), 'عليك')
-      .replace(W('معاكي'), 'معاك')
-      .replace(W('ليكي'), 'ليك')
-      .replace(W('بتعملي'), 'بتعمل')
-      .replace(W('بتقولي'), 'بتقول')
-      .replace(W('بتروحي'), 'بتروح')
-      .replace(W('عايزة'), 'عايز')
-      .replace(W('عاوزة'), 'عاوز')
-      .replace(W('فاهمة'), 'فاهم')
-      .replace(W('متقوليش'), 'متقولش')
-      .replace(W('متخافيش'), 'متخافش')
-      .replace(W('خليكي'), 'خليك')
-      .replace(W('اسمعي'), 'اسمع')
-      .replace(W('شوفي'), 'شوف');
-  }
-  return out;
+  const isFem = addresseeCategory === 'امرأة', isMasc = addresseeCategory === 'رجل' || addresseeCategory === 'رجل مسن';
+  return isFem ? rdFixGender(text, 'f', '') : isMasc ? rdFixGender(text, 'm', '') : text;
 }
 
 /** لو الشخصية جديدة (مش مقفولة يدوياً) نحسّن اختيار صوتها من طريقة كلامها نفسه، ولا نغيّر صوت شخصية المستخدم قفلها */
@@ -1906,7 +1872,7 @@ function parseNovelChapterLocally(
 
       const addressee = inferAddressee(speaker, cleanLastNarrative, updatedRegistry, prevDialogueSpeaker);
       const adaptedText =
-        lineDialect === 'egyptian' ? adaptDialogueToAddressee(spokenText, addressee?.category) : spokenText;
+        spokenText;
       const phoneticText =
         lineDialect === 'egyptian' ? applyEgyptianPhonetics(adaptedText, customDict) : spokenText;
       prevDialogueSpeaker = speaker;
@@ -1964,7 +1930,7 @@ function parseNovelChapterLocally(
         prevDialogueSpeaker
       );
       const adaptedText =
-        lineDialect === 'egyptian' ? adaptDialogueToAddressee(spokenText, addressee?.category) : spokenText;
+        spokenText;
       const phoneticText =
         lineDialect === 'egyptian' ? applyEgyptianPhonetics(adaptedText, customDict) : spokenText;
       prevDialogueSpeaker = speaker;
@@ -2093,7 +2059,8 @@ async function rdCall(env, conf, body) { // طلب TTS: بيلف على كل ا�
 }
 const rdPcm = (j) => { const b = findAudioB64(j); if (!b) return null; const raw = wavPcm(toWav(b)); return new Int16Array(raw.slice().buffer, 0, raw.length >> 1); };
 let RD_LEARN = {};
-const rdDict = (conf) => { const o = { ...RD_LEARN }; String(conf.dict || '').split('\n').forEach((l) => { const k = l.indexOf('='); if (k > 0) o[l.slice(0, k).trim()] = l.slice(k + 1).trim(); }); return o; };
+const rdLrnOk = (k) => !/(ك|كي)$/.test(String(k)); // كلمات المخاطَب (عليك/عليكي…) مبتتحفظش في القاموس: صيغتها بتتحدد من السياق مش من قاموس ثابت
+const rdDict = (conf) => { const o = {}; for (const k in RD_LEARN) if (rdLrnOk(k)) o[k] = RD_LEARN[k]; String(conf.dict || '').split('\n').forEach((l) => { const k = l.indexOf('='); if (k > 0) o[l.slice(0, k).trim()] = l.slice(k + 1).trim(); }); return o; };
 const rdEgy = (seg, conf) => seg.type === 'dialogue' || (conf.rd || RD_DEF).mode !== 'B';
 const rdScript = (seg, conf) => {
   let s = rdEgy(seg, conf) ? applyEgyptianPhonetics((seg.phoneticText && seg.phoneticText.trim()) || seg.text, rdDict(conf)) : seg.text;
@@ -2111,15 +2078,16 @@ const RD_ACC = {
   narrator_male: 'a warm Egyptian storyteller', narrator_female: 'a warm Egyptian storyteller'
 };
 // طبقة "الواقعية البشرية": تنفّس وتردد وتغيّر إيقاع ونزول صوت آخر الجملة… (0 مطفي/1 خفيف/2 أقصى)
-const RD_HUM1 = 'Perform it like a real person speaking, not reading: audible but subtle breaths between phrases, tiny natural hesitations, uneven rhythm with the pace speeding up on excited words and slowing on heavy ones, pitch falling naturally at the end of statements and rising on questions';
-const RD_HUM2 = RD_HUM1 + '. Let the emotion build and leak through the voice (a catch of breath, a held pause before a painful word, a trailing-off, a small sigh or half-laugh where the text suggests it), keep the energy of a live conversation between people in the same room, vary volume word by word, never use a flat announcer or audiobook cadence, and never give every sentence the same melody';
-const rdHuman = (conf) => { const lv = ((conf.rd || RD_DEF).human); return lv === 0 ? '' : ' ' + (lv >= 2 ? RD_HUM2 : RD_HUM1) + '.'; };
-const rdAccent = (persona, conf) => { const lv = ((conf.rd || RD_DEF).dialect); if (lv === 0) return ''; const a = RD_ACC[persona && persona.a] || ''; if (!a) return ''; return ' Speak as ' + a + (lv >= 2 ? '. Egyptian pronunciation must be flawless and consistent in EVERY word, as if a native Egyptian actor born in Cairo is performing this, with Egyptian vowel shapes (e.g. ay for ey, ee/oo not classical diphthongs) and Egyptian sentence melody; do not drift toward Gulf, Levantine or Modern Standard Arabic' : '') + '.'; };
+const RD_HUM0 = 'Say exactly the written words only, without adding, repeating, skipping or changing any word, and keep every masculine or feminine form exactly as written';
+const RD_HUM1 = 'Sound like a real person speaking naturally, not reading: subtle breaths between phrases, uneven natural rhythm, pitch falling at the end of statements and rising on questions. ' + RD_HUM0;
+const RD_HUM2 = 'Sound like a real person speaking naturally, not reading: subtle breaths between phrases, uneven natural rhythm, pitch falling at the end of statements and rising on questions, emotion coming through the voice, volume varying with meaning, never a flat announcer cadence. ' + RD_HUM0;
+const rdHuman = (conf) => { const lv = ((conf.rd || RD_DEF).human); return ' ' + (lv === 0 ? RD_HUM0 : lv >= 2 ? RD_HUM2 : RD_HUM1) + '.'; };
+const rdAccent = (persona, conf) => { const lv = ((conf.rd || RD_DEF).dialect); if (lv === 0) return ''; const a = RD_ACC[persona && persona.a] || ''; if (!a) return ''; return ' Speak as ' + a + (lv >= 2 ? '. Keep authentic Cairo pronunciation (hard G for jeem, glottal stop for qaf) and stay in Egyptian colloquial throughout, never drifting to Gulf, Levantine or Modern Standard Arabic' : '') + '.'; };
 const RD_CUE = 'in a natural Cairo Egyptian colloquial accent (Masri, never Gulf/Saudi), like a real human in a real conversation: natural breaths, small hesitations, varied pace and pitch, spontaneous and emotionally alive; a steady natural chest voice like an ordinary adult, no vocal breaks or cracking, no breathy or affected effeminate softness, no sing-song; end words with sukun and never pronounce Arabic grammatical case endings (i3raab); never robotic and never like reading text aloud';
 const RD_STY = { angry_shout: ['Say angrily and loudly with intense dramatic emotion', 'Say angrily and loudly with intense dramatic emotion in Arabic'], fear_whisper: ['Say in a frightened, trembling, breathless whisper', 'Say in a frightened, trembling whisper in Arabic'], child_fear: ["Say in a scared, crying little child's voice", "Say in a scared, crying little child's voice in Arabic"], crying_sad: ['Say in a sad, heartbroken, tearful voice', 'Say in a sad, tearful voice in Arabic'], sarcastic_cold: ['Say in a cold, sarcastic, mocking tone', 'Say in a cold, sarcastic tone in Arabic'], shock_surprise: ['Say in a shocked, breathless, astonished tone', 'Say in a shocked, astonished tone in Arabic'], happy_warm: ['Say in a warm, affectionate, reassuring Egyptian tone', 'Say in a warm, affectionate, reassuring tone in Arabic'], dramatic_narrator: ['Say as a warm, intimate human storyteller who lives the story, with natural breaths and pauses', 'Say as a deep, resonant, warm human audiobook storyteller in clear Modern Standard Arabic, unhurried measured pace, meaningful pauses, steady chest voice with no vocal breaks, no breathy or affected softness, never robotic'], natural_dialogue: ['Say naturally', 'Say as a natural, expressive human speaker in clear Modern Standard Arabic, steady chest voice, no vocal breaks or affected softness, natural pauses and intonation, never robotic'] };
 async function rdSpeak(env, seg, persona, conf) { // مقطع واحد بصوت شخصيته — نفس صيغة الأداة الجديدة (جملة إخراج قصيرة + النص) بـ3 محاولات
   const egy = rdEgy(seg, conf), script = rdScript(seg, conf), st = RD_STY[seg.emotionId] || RD_STY.natural_dialogue;
-  const acc = egy ? rdAccent(persona, conf) : '', directive = egy ? st[0] + ' ' + RD_CUE + acc + rdHuman(conf) : st[1] + rdHuman(conf);
+  const addrH = seg.addr === 'm' ? ' You are speaking to a man, so address him with masculine forms exactly as written.' : seg.addr === 'f' ? ' You are speaking to a woman, so address her with feminine forms exactly as written.' : '', acc = (egy ? rdAccent(persona, conf) : '') + addrH, directive = egy ? st[0] + ' ' + RD_CUE + acc + rdHuman(conf) : st[1] + acc + rdHuman(conf);
   const cands = egy ? [directive + ': ' + script, 'Say ' + RD_CUE + acc + rdHuman(conf) + ': ' + script, script] : [directive + ': ' + script, script, String(seg.text)];
   const need = String(seg.text).replace(/\s/g, '').length;
   for (const pr of cands) {
@@ -2138,7 +2106,7 @@ async function rdMega(env, batch, conf) { // الدمج الفائق: لحد 7 �
   const sp = []; batch.forEach((s) => { if (!sp.find((u) => u.tag === s.speaker)) sp.push({ tag: s.speaker, p: rdPers(s.pid) }); });
   const A = sp[0], B = sp[1] || { tag: 'المتحدث_الثاني', p: rdPers('youssef') };
   const lines = batch.map((s) => { const emo = RD_E[s.emotionId] || RD_E.natural_dialogue; return s.speaker + ': (' + emo.l + ' - ' + (s.actingDirection || '') + ') ' + rdScript(s, conf); }).join('\n');
-  const accL = sp.map((u) => { const a = rdAccent(u.p, conf); return a ? u.tag + ':' + a : ''; }).filter(Boolean).join(' | '), prompt = 'قم بتمثيل هذا المشهد الدرامي المصري ببراعة وواقعية بشرية 100% باللهجة العامية المصرية القاهرية الصميمة (نطق الجيم المصرية غير المعطشة G، وصل الكلمات بنعومة بشرية، والالتزام التام بالتشكيل الصوتي المصري المكتوب دون تحويل أي كلمة للفصحى).' + (((conf.rd || RD_DEF).mode === 'B') && batch.some((s) => s.type === 'narration') ? '\nاستثناء: المتحدث «الراوي» يقرأ سرده باللغة العربية الفصحى السليمة.' : '') + ''+(accL?'\nتوجيه لهجة كل متحدث (Egyptian accent coaching) — '+accL:'')+(rdHuman(conf)?'\nتوجيه الأداء البشري (Human performance direction):'+rdHuman(conf):'')+'\nالتزم بالانفعال المكتوب بين القوسين لكل جملة دون أن تنطق الكلام الموجود داخل القوسين ودون نطق أسماء المتحدثين:\n\n' + lines;
+  const gW = (u) => { const g = rdGen(u.p.id); return g === 'm' ? 'رجل' : g === 'f' ? 'امرأة' : ''; }, adL = (sp.length === 2 && sp[0].tag !== 'الراوي' && sp[1].tag !== 'الراوي' && gW(sp[0]) && gW(sp[1])) ? '\nمين بيكلم مين: ' + sp[0].tag + ' (' + gW(sp[0]) + ') بيكلم ' + sp[1].tag + ' (' + gW(sp[1]) + ') والعكس — اقرأ كل كلمة بصيغتها المكتوبة بالظبط (مذكر/مؤنث) ومتغيّرش إنت/إنتِ ولا عليك/عليكي.' : '', accL = sp.map((u) => { const a = rdAccent(u.p, conf); return a ? u.tag + ':' + a : ''; }).filter(Boolean).join(' | '), prompt = 'قم بتمثيل هذا المشهد الدرامي المصري ببراعة وواقعية بشرية 100% باللهجة العامية المصرية القاهرية الصميمة (نطق الجيم المصرية غير المعطشة G، وصل الكلمات بنعومة بشرية، والالتزام التام بالتشكيل الصوتي المصري المكتوب دون تحويل أي كلمة للفصحى).' + (((conf.rd || RD_DEF).mode === 'B') && batch.some((s) => s.type === 'narration') ? '\nاستثناء: المتحدث «الراوي» يقرأ سرده باللغة العربية الفصحى السليمة.' : '') + ''+(accL?'\nتوجيه لهجة كل متحدث (Egyptian accent coaching) — '+accL:'')+adL+(rdHuman(conf)?'\nتوجيه الأداء البشري (Human performance direction):'+rdHuman(conf):'')+'\nالتزم بالانفعال المكتوب بين القوسين لكل جملة دون أن تنطق الكلام الموجود داخل القوسين ودون نطق أسماء المتحدثين:\n\n' + lines;
   const body = JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseModalities: ['AUDIO'], speechConfig: { multiSpeakerVoiceConfig: { speakerVoiceConfigs: [{ speaker: A.tag, voiceConfig: { prebuiltVoiceConfig: { voiceName: A.p.v } } }, { speaker: B.tag, voiceConfig: { prebuiltVoiceConfig: { voiceName: B.p.v } } }] } } } });
   const need = batch.reduce((a, s) => a + String(s.text).replace(/\s/g, '').length, 0);
   try {
@@ -2197,6 +2165,21 @@ async function rdLearnAudio(env, b64, mime, word, hint) {
   return clean;
 }
 // جنس الراوي لكل رواية: m = كريم، f = سلمى (بيتحفظ للرواية كلها)
+const rdGen = (pid) => { try { const a = (rdPers(pid) || {}).a || ''; return /female/.test(a) ? 'f' : /male/.test(a) ? 'm' : ''; } catch (e) { return ''; } };
+// مين بيكلم مين: المخاطَب = الشخصية التانية في الحوار (بالدور المتبادل)؛ نغيّر صيغة المخاطَب بس لما نكون متأكدين
+function rdGenderPass(items) {
+  const spk = new Set(items.filter((x) => x.type === 'dialogue').map((x) => x.speaker)), two = spk.size === 2;
+  items.forEach((it, i) => {
+    if (it.type !== 'dialogue') return;
+    const near = (j) => items[j] && items[j].type === 'dialogue' && items[j].speaker !== it.speaker;
+    let aj = -1;
+    for (let j = i - 1; j >= Math.max(0, i - (two ? 3 : 1)); j--) { if (near(j)) { aj = j; break; } if (items[j].type === 'dialogue') break; }
+    if (aj < 0) for (let j = i + 1; j <= Math.min(items.length - 1, i + (two ? 3 : 1)); j++) { if (near(j)) { aj = j; break; } if (items[j].type === 'dialogue') break; }
+    const ag = aj >= 0 ? rdGen(items[aj].pid) : '', sg = rdGen(it.pid);
+    it.addr = ag;
+    if (ag || sg) { it.text = rdFixGender(it.text, ag, sg); if (it.phoneticText) it.phoneticText = rdFixGender(it.phoneticText, ag, sg); }
+  });
+}
 async function rdNarrator(env, nid, cf) {
   let g = ''; try { g = ((await getSetting(env, 'rdnar_' + (nid || 'x'))) || {}).g || ''; } catch (e) {}
   return g === 'f' ? 'salma' : g === 'm' ? 'kareem' : cf.narrator;
@@ -2224,6 +2207,7 @@ async function radadPart(env, text, conf, ctx, nid) {
   if (!items.length) build([{ text, speaker: 'الراوي', type: 'narration' }]);
   if (!items.length) { const e = new Error('empty_text'); e.code = 400; throw e; }
   if (dirty) { try { await setSetting(env, regKey, reg); } catch (e) {} }
+  try { rdGenderPass(items); } catch (e) {}
   if (cf.skipNarration) { const keep = items.filter((x) => x.type !== 'narration'); if (keep.length) { items.length = 0; items.push(...keep); } }
   let jobs;
   if (conf.engine === 'single') jobs = items.map((x) => [x]);
