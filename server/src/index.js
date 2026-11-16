@@ -1382,6 +1382,19 @@ function applyAllahPronunciation(text) {
   return t;
 }
 
+// V11: الوقف المصري — المصريين مابينطقوش حركات الإعراب في آخر الكلمة (اللهِ/كتابُ/مِنَ…). بنشيل آخر حركة قصيرة من أي كلمة (إلا ك/ت علشان المذكر/المؤنث، وإلا الحرف المشدّد)
+const RD_PZ = /^(.*[\u0621-\u064A])([\u064B-\u0652]*)$/;
+function rdPausalWord(w) {
+  const m = RD_PZ.exec(w); if (!m || !m[2]) return w;
+  const base = m[1], marks = m[2];
+  if (/[\u0651\u0652\u064B]/.test(marks)) return w; // شدّة / سكون / تنوين فتح: سيبه
+  if (!/[\u064C\u064D\u064E\u064F\u0650]/.test(marks)) return w;
+  const last = base[base.length - 1];
+  if (last === 'ك' || last === 'ت') return w;
+  if (base.replace(/[\u064B-\u0652]/g, '').length < 2) return w;
+  return base;
+}
+function rdPausal(text) { return String(text || '').replace(/[\u0621-\u064A][\u0621-\u064A\u064B-\u0652\u0670]*/g, rdPausalWord); }
 function applyEgyptianPhonetics(rawText, customDict = {}) {
   if (!rawText || !rawText.trim()) return '';
   rawText = normalizeArabicInput(rawText);
@@ -1472,6 +1485,7 @@ function applyEgyptianPhonetics(rawText, customDict = {}) {
 
       return token;
     })
+    .map(rdPausal)
     .join('');
 }
 
@@ -2063,7 +2077,7 @@ const rdLrnOk = (k) => !/(ك|كي)$/.test(String(k)); // كلمات المخاط
 const rdDict = (conf) => { const o = {}; for (const k in RD_LEARN) if (rdLrnOk(k)) o[k] = RD_LEARN[k]; String(conf.dict || '').split('\n').forEach((l) => { const k = l.indexOf('='); if (k > 0) o[l.slice(0, k).trim()] = l.slice(k + 1).trim(); }); return o; };
 const rdEgy = (seg, conf) => seg.type === 'dialogue' || (conf.rd || RD_DEF).mode !== 'B';
 const rdScript = (seg, conf) => {
-  let s = rdEgy(seg, conf) ? applyEgyptianPhonetics((seg.phoneticText && seg.phoneticText.trim()) || seg.text, rdDict(conf)) : seg.text;
+  let s = rdEgy(seg, conf) ? applyEgyptianPhonetics((seg.phoneticText && seg.phoneticText.trim()) || seg.text, rdDict(conf)) : applyAllahPronunciation(seg.text);
   if ((conf.rd || RD_DEF).humanize && (seg.emotionId === 'fear_whisper' || seg.emotionId === 'crying_sad')) s = s.replace(/\.\./g, '... ');
   return s;
 };
