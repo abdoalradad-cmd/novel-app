@@ -2360,7 +2360,7 @@ async function ttsStep0(env, opts = {}) {
   const u = await env.DB.prepare('SELECT secs FROM tts_use WHERE day=? AND prov=?').bind(dayKey(), prov).first();
   let used = u ? u.secs : 0; const cap = provCapE(env, conf, prov) * 60, par = provPar(conf, prov);
   if (used >= cap) return { ok: true, idle: 'daily_limit', prov };
-  try { await env.DB.prepare("UPDATE tts_ch SET status='queued',attempts=0,retry_at=0 WHERE status='failed' AND prov=? AND updated<?").bind(prov, now - 1800000).run(); } catch (e) {} // الفصل الفاشل بيتعاد تلقائي بعد نص ساعة (مفيش فصل بيتسقط)
+  try { await env.DB.prepare("UPDATE tts_ch SET status='queued',attempts=0,retry_at=0 WHERE status='failed' AND prov=? AND updated<?").bind(prov, now - 900000).run(); } catch (e) {} // الفصل الفاشل بيتعاد تلقائي بعد ربع ساعة (مفيش فصل بيتسقط)
   const tok = crypto.randomUUID();
   const r = await env.DB.prepare("UPDATE tts_ch SET status='running',owner=?2,lock_until=?1+240000,attempts=attempts WHERE id=(SELECT id FROM tts_ch WHERE prov=?3 AND status IN ('queued','running') AND lock_until<=?1 AND retry_at<=?1 ORDER BY ord ASC,nid ASC,idx ASC LIMIT 1)").bind(now, tok, prov).run();
   if (r && r.meta && typeof r.meta.changes === 'number' && !r.meta.changes) return { ok: true, idle: 'empty', prov };
@@ -2397,7 +2397,7 @@ async function ttsStep0(env, opts = {}) {
       }
     }
     if (limited) {
-      const cs = await getSetting(env, key), strikes = (cs.strikeAt && Date.now() - cs.strikeAt < 3600000 ? (cs.strikes || 0) : 0) + 1, daily = /PerDay|per day|daily/i.test(limMsg), wait = 30; // زي الأول: لو جوجل رفض، نستنى نص ساعة ونبعت الفصل تاني
+      const cs = await getSetting(env, key), strikes = (cs.strikeAt && Date.now() - cs.strikeAt < 3600000 ? (cs.strikes || 0) : 0) + 1, daily = /PerDay|per day|daily/i.test(limMsg), wait = 15; // لو جوجل رفض، نستنى ربع ساعة ونبعت الفصل تاني
       await setSetting(env, key, { ...cs, strikes, strikeAt: Date.now(), pausedUntil: Date.now() + wait * 60000, exhaustedAt: Date.now(), limMsg, limDaily: daily });
       await ttsBump(env, prov, { limited: 1 });
       await ttsAlertAdmins(env, '⚠️ تحويل الصوت وقف (' + PNAME[prov] + '): الحصة خلصت أو الطلبات كتيرة', PNAME[prov] + ' رفضت طلبات الصوت (429). التحويل واقف شوية وهيكمّل لوحده. راجع حصتك أو فعّل الفوترة.', prov);
