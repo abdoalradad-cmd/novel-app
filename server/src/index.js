@@ -2496,7 +2496,7 @@ async function ttsDoneNotify(env, ch) { // فصل اتحوّل لصوت: إشع�
 async function ttsStats(env) {
   const conf = await getTtsConf(env), d = dayKey(), mo = d.slice(0, 7), pr = ttsPrices(conf);
   const sum = async (prov, where, ...a) => env.DB.prepare('SELECT COALESCE(SUM(reqs),0) AS reqs,COALESCE(SUM(chars),0) AS chars,COALESCE(SUM(secs),0) AS secs,COALESCE(SUM(cost),0) AS cost,COALESCE(SUM(fails),0) AS fails,COALESCE(SUM(limited),0) AS limited FROM tts_use WHERE prov=? AND ' + where).bind(prov, ...a).first();
-  const { results: novels } = await env.DB.prepare("SELECT nid,MAX(ntitle) AS title,MIN(ord) AS ord,MAX(prov) AS prov,COUNT(*) AS n,SUM(status='done') AS d,SUM(CASE WHEN status='running' AND lock_until>"+Date.now()+" THEN 1 ELSE 0 END) AS run,SUM(LENGTH(text)) AS chars,SUM(CASE WHEN status='done' THEN 0 ELSE LENGTH(text)*(1.0-done*1.0/(CASE WHEN nparts<1 THEN 1 ELSE nparts END)) END) AS rem FROM tts_ch GROUP BY nid ORDER BY MIN(ord),nid LIMIT 120").all();
+  const { results: novels } = await env.DB.prepare("SELECT nid,MAX(ntitle) AS title,MIN(ord) AS ord,MAX(prov) AS prov,COUNT(*) AS n,SUM(status='done') AS d,SUM(CASE WHEN status='running' AND lock_until>"+Date.now()+" THEN 1 ELSE 0 END) AS run,SUM(LENGTH(text)) AS chars,SUM(CASE WHEN status='done' THEN 0 ELSE LENGTH(text)*(1.0-done*1.0/(CASE WHEN nparts<1 THEN 1 ELSE nparts END)) END) AS rem FROM tts_ch WHERE status!='off' GROUP BY nid ORDER BY MIN(ord),nid LIMIT 120").all();
   const q = await env.DB.prepare('SELECT prov,status,COUNT(*) AS n FROM tts_ch GROUP BY prov,status').all();
   const out = { conf, hasBucket: !!env.TTS_BUCKET, has: { ...Object.fromEntries(PROVS.filter(isGoogle).map((p) => [p, !!gemKey(env, p)])) }, prov: {}, nkeys: Object.fromEntries(PROVS.filter(isGoogle).map((p) => [p, gKeyList({ GEMINI_API_KEY: gemKey(env, p) }).length])), keys: Object.fromEntries(Object.entries(await savedKeys(env)).map(([p, v]) => [p, v ? 'app' : ''])), prices: pr,
     chapters: { queued: 0, running: 0, done: 0, failed: 0 }, novels: novels.map((r) => ({ nid: r.nid, title: r.title, ord: r.ord, prov: r.prov, n: r.n, d: r.d || 0, run: r.run || 0, rem: Math.round(r.rem || 0) })) };
@@ -3435,12 +3435,33 @@ async function route(request, env) {
         const ntitle = str(it.ntitle, 120), ctitle = str(it.ctitle, 120); let ord = Math.max(-1e9, Math.min(1e9, parseInt(it.ord, 10) || 0));
         const ex = await env.DB.prepare('SELECT id,sig,prov,text,nparts,status FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
         const sib = await env.DB.prepare('SELECT prov,MIN(ord) AS o FROM tts_ch WHERE nid=?').bind(nid).first(), prov = conf.novelProv[nid] || (sib && sib.prov) || conf.defProv;
-        if (!ex) { if (sib && sib.o != null) ord = sib.o; await env.DB.prepare('INSERT INTO tts_ch (nid,idx,ntitle,ctitle,ord,sig,text,parts,nparts,created,updated,prov) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind(nid, ix, ntitle, ctitle, ord, sig, text, JSON.stringify(parts), parts.length, now, now, prov).run(); added++; }
+        if (!ex) { if (sib && sib.o != null) { const old = await env.DB.prepare('SELECT MIN(created) AS c FROM tts_ch WHERE nid=?').bind(nid).first(); if (old && old.c && now - old.c > 600000) { const mx = await env.DB.prepare('SELECT COALESCE(MAX(ord),0) AS m FROM tts_ch').first(); ord = mx.m + 1; } else ord = sib.o; } await env.DB.prepare('INSERT INTO tts_ch (nid,idx,ntitle,ctitle,ord,sig,text,parts,nparts,created,updated,prov) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').bind(nid, ix, ntitle, ctitle, ord, sig, text, JSON.stringify(parts), parts.length, now, now, prov).run(); added++; }
+        else if (ex.status === 'off' && !it.redo) { skipped++; } // فصل متشال يدوي من الطابور: السينك ما يرجّعوش لوحده
         else if (!it.redo && (ex.status === 'done' || (ex.sig === sig && !(hasMk(text) && !hasMk(ex.text))))) { await env.DB.prepare('UPDATE tts_ch SET ntitle=?,ctitle=? WHERE id=?').bind(ntitle, ctitle, ex.id).run(); skipped++; }
         else {
           if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < ex.nparts; i++) ks.push('c/' + ex.id + '/' + i + '.wav'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); } await env.DB.prepare("UPDATE tts_ch SET ntitle=?,ctitle=?,sig=?,text=?,parts=?,nparts=?,done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=?,prov=? WHERE id=?").bind(ntitle, ctitle, sig, text, JSON.stringify(parts), parts.length, now, prov, ex.id).run(); updated++; }
       }
       return json({ ok: true, added, updated, skipped });
+    }
+    // ---- تحكم في كل فصل لوحده ----
+    if (path === '/api/admin/tts/chapters' && m === 'GET') {
+      const nid = str(url.searchParams.get('nid'), 80);
+      const { results } = await env.DB.prepare('SELECT idx,ctitle,status,done,nparts,secs,err,ord,attempts,LENGTH(text) AS n FROM tts_ch WHERE nid=? ORDER BY idx').bind(nid).all();
+      return json({ chapters: results });
+    }
+    if (path === '/api/admin/tts/ch' && m === 'POST') {
+      const b = await body(request, 600), nid = str(b.nid, 80), ix = parseInt(b.idx, 10), op = String(b.op || '');
+      const c = await env.DB.prepare('SELECT id,nparts,status FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first(); if (!c) return fail('الفصل مش في الطابور', 404);
+      const wipe = async () => { if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < c.nparts; i++) ks.push('c/' + c.id + '/' + i + '.wav'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); } };
+      const now = Date.now();
+      if (op === 'off') { await wipe(); await env.DB.prepare("UPDATE tts_ch SET status='off',done=0,secs=0,owner='',lock_until=0,err='',updated=? WHERE id=?").bind(now, c.id).run(); }
+      else if (op === 'on') await env.DB.prepare("UPDATE tts_ch SET status=CASE WHEN done>=nparts AND nparts>0 THEN 'done' ELSE 'queued' END,attempts=0,retry_at=0,err='',owner='',lock_until=0,updated=? WHERE id=?").bind(now, c.id).run();
+      else if (op === 'redo') { await wipe(); await env.DB.prepare("UPDATE tts_ch SET status='queued',done=0,secs=0,sig='',attempts=0,retry_at=0,err='',owner='',lock_until=0,updated=? WHERE id=?").bind(now, c.id).run(); }
+      else if (op === 'front') { const mn = await env.DB.prepare('SELECT COALESCE(MIN(ord),0) AS m FROM tts_ch').first(); await env.DB.prepare('UPDATE tts_ch SET ord=? WHERE id=?').bind(mn.m - 1, c.id).run(); }
+      else if (op === 'end') { const mx = await env.DB.prepare('SELECT COALESCE(MAX(ord),0) AS m FROM tts_ch').first(); await env.DB.prepare('UPDATE tts_ch SET ord=? WHERE id=?').bind(mx.m + 1, c.id).run(); }
+      else if (op === 'del') { await wipe(); await env.DB.prepare('DELETE FROM tts_ch WHERE id=?').bind(c.id).run(); }
+      else return fail('عملية غير معروفة');
+      return json({ ok: true, ...(await ttsStats(env)) });
     }
     if (path === '/api/admin/tts/front' && m === 'POST') {
       const b = await body(request, 500), nid = str(b.nid, 80);
@@ -3490,7 +3511,7 @@ async function route(request, env) {
       const raw = await getSetting(env, 'tts'); await setSetting(env, 'tts', { ...raw, novelProv: { ...conf.novelProv, [nid]: prov } });
       if (cur && (cur.prov !== prov || b.redo)) {
         await ttsWipeNovel(env, nid);
-        await env.DB.prepare("UPDATE tts_ch SET prov=?,sig='',done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=? WHERE nid=?").bind(prov, Date.now(), nid).run();
+        await env.DB.prepare("UPDATE tts_ch SET prov=?,sig='',done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=? WHERE nid=? AND status!='off'").bind(prov, Date.now(), nid).run();
       }
       return json({ ok: true, ...(await ttsStats(env)) });
     }
