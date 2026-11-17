@@ -332,13 +332,13 @@ async function notifyAdmins(env, who, title, text, ref = 'ordadm') {
 /* ---------- الصوت المصري: Gemini + Azure — طابور لكل مزوّد + أصوات متعددة + تخزين R2 + متابعة التكلفة ---------- */
 const ROLES = ['narrator', 'man', 'woman', 'boy', 'girl'];
 const G_VOICES = { narrator: 'Charon', man: 'Orus', woman: 'Kore', boy: 'Puck', girl: 'Leda' };
-const RD_DEF = { mode: 'B', skipNarration: false, humanize: true, pauseMs: 380, batch: 7, autoWait: true, waitSec: 16, narrator: 'kareem', archMap: {}, pers: {}, analysis: 'ai', anaModel: 'gemini-3-flash-preview', partChars: 0, dialect: 2, human: 1 };
+const RD_DEF = { mode: 'B', skipNarration: false, humanize: true, pauseMs: 380, batch: 7, autoWait: true, waitSec: 16, narrator: 'kareem', archMap: {}, pers: {}, analysis: 'ai', anaModel: 'gemini-3-flash-preview', partChars: 0, dialect: 2, human: 1, tashkeel: 1 };
 function normRd(x) { // كل إعدادات أداة الرداد (كلها بتتغيّر من الأدمن؛ الافتراضي = اللي كان شغال)
   x = x && typeof x === 'object' ? x : {}; const num = (v, d, lo, hi) => (v == null || v === '' || isNaN(+v) ? d : Math.max(lo, Math.min(hi, +v)));
   const ids = RD_P.map((p) => p.id), am = {}, ps = {};
   Object.entries(x.archMap || {}).forEach(([k, v]) => { if (ids.includes(v) && /^[a-z_]{2,40}$/.test(k)) am[k] = v; });
   Object.entries(x.pers || {}).forEach(([k, v]) => { if (ids.includes(k) && v) ps[k] = { v: /^[A-Za-z]{3,24}$/.test(v.v || '') ? v.v : '', p: +v.p ? num(v.p, 0, 0.7, 1.4) : 0 }; });
-  return { mode: ['A', 'B', 'C'].includes(x.mode) ? x.mode : 'B', analysis: x.analysis === 'local' ? 'local' : 'ai', skipNarration: x.skipNarration === true, humanize: x.humanize !== false, pauseMs: num(x.pauseMs, 380, 0, 3000), batch: Math.round(num(x.batch, 7, 1, 10)), autoWait: x.autoWait !== false, waitSec: Math.round(num(x.waitSec, 16, 0, 60)), narrator: ids.includes(x.narrator) ? x.narrator : 'kareem', archMap: am, pers: ps, anaModel: /^[a-z0-9.\-]{4,60}$/i.test(x.anaModel || '') ? x.anaModel : 'gemini-3-flash-preview', partChars: Math.round(num(x.partChars, 0, 0, 3000)), learn: x.learn !== false, dialect: Math.round(num(x.dialect, 2, 0, 2)), human: Math.round(num(x.human, 1, 0, 2)) };
+  return { mode: ['A', 'B', 'C'].includes(x.mode) ? x.mode : 'B', analysis: x.analysis === 'local' ? 'local' : 'ai', skipNarration: x.skipNarration === true, humanize: x.humanize !== false, pauseMs: num(x.pauseMs, 380, 0, 3000), batch: Math.round(num(x.batch, 7, 1, 10)), autoWait: x.autoWait !== false, waitSec: Math.round(num(x.waitSec, 16, 0, 60)), narrator: ids.includes(x.narrator) ? x.narrator : 'kareem', archMap: am, pers: ps, anaModel: /^[a-z0-9.\-]{4,60}$/i.test(x.anaModel || '') ? x.anaModel : 'gemini-3-flash-preview', partChars: Math.round(num(x.partChars, 0, 0, 3000)), learn: x.learn !== false, dialect: Math.round(num(x.dialect, 2, 0, 2)), human: Math.round(num(x.human, 1, 0, 2)), tashkeel: Math.round(num(x.tashkeel, 1, 0, 1)) };
 }
 const TTS_DEFAULT = { model: 'gemini-3.8-flash-tts', legacyModel: 'gemini-2.5-flash-preview-tts', style: 'warm, expressive audiobook narration in natural Egyptian Arabic', concurrency: 2, dailyMin: 20, freeMin: 0, priceIn: 0, priceOut: 0,
   gv: G_VOICES, defProv: 'gemini', novelProv: {} };
@@ -2099,6 +2099,7 @@ const rdDict = (conf) => { const o = {}; for (const k in RD_LEARN) if (rdLrnOk(k
 const rdEgy = (seg, conf) => seg.type === 'dialogue' || (conf.rd || RD_DEF).mode !== 'B';
 const rdScript = (seg, conf) => {
   let s = rdEgy(seg, conf) ? applyEgyptianPhonetics((seg.phoneticText && seg.phoneticText.trim()) || seg.text, rdDict(conf)) : applyAllahPronunciation(seg.text);
+  if (rdEgy(seg, conf) && (conf.rd || RD_DEF).tashkeel === 0) s = s.replace(/[\u064B-\u0652\u0670]/g, ''); // وضع «من غير تشكيل»: الكلام بالرسم المصري بس
   if ((conf.rd || RD_DEF).humanize && (seg.emotionId === 'fear_whisper' || seg.emotionId === 'crying_sad')) s = s.replace(/\.\./g, '... ');
   return s;
 };
