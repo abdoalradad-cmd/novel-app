@@ -2201,6 +2201,19 @@ async function rdLearnAudio(env, b64, mime, word, hint) {
   return clean;
 }
 // جنس الراوي لكل رواية: m = كريم، f = سلمى (بيتحفظ للرواية كلها)
+// جنس الشخصية من اسمها (قوائم أسماء + ألقاب) — بتغلب على تخمين النموذج علشان ما نديش ست صوت راجل
+const RD_NM_F = 'سناء سلمي ليلي نور نورا نورهان هدي هدير هبه هاله هناء هند ريم رنا رانيا رحمه رشا رضوي زينب زهره ساره سارا سمر سميه سعاد سلوي سهير ساميه شيماء شهد شروق شاديه صفاء صباح ضحي عايشه عائشه عايده علا عبير ايه ايمان امل اميره اسماء اسراء انتصار الفت الهام بسمه بسنت بدور بثينه تهاني تغريد جميله جيهان جني حنان حبيبه حياه حسناء حليمه خديجه خلود دعاء دينا دنيا دلال رباب رقيه رغده روان روضه ريهام زهراء زكيه سوسن سحر سندس سيلين شريفه شاهنده صابرين عفاف عزه عليا غاده غدير فاطمه فريده فرح فيروز فايزه قمر كريمه كوثر لمياء لبني لينا لمي ماجده مريم مني مها ميار مي ميرنا مروه ملك منال ميسون ناديه ناهد نجلاء نجوي نسرين نهي نيره نشوي نعمه هاجر هايدي هيام وفاء وداد ولاء ياسمين يسري يمني ندي نوال نبيله سميره صفيه تسنيم الاء رولا ريما لارا سالي ماريا مارييه نانسي شيرين شرين فوزيه فتحيه فايقه ورده بهيه نعيمه عزيزه انوار سلمي مديحه ليديا جومانا جوهره رحاب ايناس ابتسام ازهار اماني امنيه ايفا بتول بشري بلقيس تحيه ثريا جنات حور خيريه دارين دعد ذكري رابعه ربا رزان رفيده روفيدا سجي سديل سلاف سما سمحه شذا شفق شمس صفوه طيبه عالياء غزل فجر فدوي كاميليا كوكب لجين لطيفه ليان مارتينا مرفت مفيده منيره موني ناجيه نجاح نرمين نغم هنادي وسام وعد يارا يقين'.split(/\s+/).filter(Boolean);
+const RD_NM_M = 'احمد محمد محمود علي عمر عمرو خالد يوسف كريم طارق حسن حسين ابراهيم مصطفي عبدالله عبدالرحمن هشام سامح سيف زياد ياسر ياسين امير انس باسم بلال تامر تميم جمال جاسر حازم حمزه حمدي خليل رامي رضا زكريا سامي سعيد سليم سليمان شريف صلاح عادل عاصم عصام عماد فارس فادي فتحي فريد فهد قاسم كمال ماجد مازن مالك مجدي مراد مروان مسعد معتز منصور مهند ناصر نبيل نادر هاني وائل وليد ياسر يحيي يزيد يونس ادهم اسامه اشرف اكرم ايمن ايهاب بهاء حاتم حسام رمضان سمير صبري عبدالعزيز عزت علاء غسان فؤاد لؤي ممدوح مختار نعمان هيثم وسيم'.split(/\s+/).filter(Boolean);
+const rdNmNorm = (t) => String(t || '').replace(/[ً-ْٰـ]/g, '').replace(/[أإآٱ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه').trim();
+let RD_NM_FS = null, RD_NM_MS = null;
+function rdNameGender(name) {
+  if (!RD_NM_FS) { RD_NM_FS = new Set(RD_NM_F.map(rdNmNorm)); RD_NM_MS = new Set(RD_NM_M.map(rdNmNorm)); }
+  let w = rdNmNorm(name).replace(/[^ء-ي\s]/g, ' ').split(/\s+/).filter(Boolean); if (!w.length) return '';
+  const F = /^(الست|ست|الحاجه|مدام|ماما|طنط|خالتي|عمتي|الاستاذه|الدكتوره|دكتوره|المدرسه|الانسه|انسه|مس|ام|جدتي|تيتا|نينه|الممرضه)$/, M = /^(ابو|عم|الحاج|حاج|الاستاذ|استاذ|الدكتور|دكتور|المدرس|بابا|عمو|خالو|جدي|الباشا|باشا|المعلم|معلم|سيد|السيد|الشيخ|شيخ|الظابط|الضابط|ظابط|ضابط)$/;
+  const t0 = w[0]; if (F.test(t0)) return 'f'; if (M.test(t0)) return 'm';
+  for (const x of w) { if (RD_NM_FS.has(x)) return 'f'; if (RD_NM_MS.has(x)) return 'm'; }
+  return '';
+}
 const rdGen = (pid) => { try { const a = (rdPers(pid) || {}).a || ''; return /female/.test(a) ? 'f' : /male/.test(a) ? 'm' : ''; } catch (e) { return ''; } };
 // مين بيكلم مين: المخاطَب = الشخصية التانية في الحوار (بالدور المتبادل)؛ نغيّر صيغة المخاطَب بس لما نكون متأكدين
 function rdGenderPass(items) {
@@ -2231,6 +2244,12 @@ async function radadPart(env, text, conf, ctx, nid) {
     const clean = String(s.text || '').replace(/^[-–—•]\s*/, '').trim(); if (!clean) continue;
     const sp = String(s.speaker || 'الراوي').trim() || 'الراوي', dlg = s.type !== 'narration' && sp !== 'الراوي';
     let pid = sp === 'الراوي' ? rdPers(cf.narrator).id : reg[sp];
+    if (sp !== 'الراوي') { // اسم معروف الجنس: نصحّح الصوت المحفوظ/المتخمَّن لو جنسه غلط
+      const ng = rdNameGender(sp), cg = pid ? rdGen(pid) : '';
+      if (ng && cg && ng !== cg) { const a0 = (rdPers(pid) || {}).a || ''; pid = ng === 'f' ? (/young/.test(a0) ? 'layla' : 'noor') : (/young/.test(a0) ? 'youssef' : 'tarek'); reg[sp] = pid; dirty = true; }
+      else if (ng && !pid && !s.vid && !cf.archMap[s.speakerArchetype]) { const a1 = String(s.speakerArchetype || ''), ay = /young/.test(a1); pid = ng === 'f' ? (ay ? 'layla' : 'noor') : (ay ? 'youssef' : 'tarek'); reg[sp] = pid; dirty = true; }
+      else if (ng && !pid && !s.vid && cf.archMap[s.speakerArchetype] && rdGen(cf.archMap[s.speakerArchetype]) && rdGen(cf.archMap[s.speakerArchetype]) !== ng) { const ay2 = /young/.test(String(s.speakerArchetype || '')); pid = ng === 'f' ? (ay2 ? 'layla' : 'noor') : (ay2 ? 'youssef' : 'tarek'); reg[sp] = pid; dirty = true; }
+    }
     if (!pid) { const p = s.vid ? rdPers(s.vid) : sp === 'الراوي' ? rdPers(cf.narrator) : (cf.archMap[s.speakerArchetype] ? rdPers(cf.archMap[s.speakerArchetype]) : (rdByArch(s.speakerArchetype) || rdPers('tarek'))); pid = p.id; reg[sp] = pid; dirty = true; }
     items.push({ type: dlg ? 'dialogue' : 'narration', speaker: sp, text: clean, phoneticText: String(s.phoneticText || '').replace(/^[-–—•]\s*/, '').trim(), emotionId: RD_E[s.emotionId] ? s.emotionId : 'natural_dialogue', intensity: RD_I[s.intensity] ? s.intensity : 'strong', actingDirection: s.actingDirection || 'أداء تمثيلي مصري صادق ومعبر', pid });
   }
