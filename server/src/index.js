@@ -1811,8 +1811,20 @@ function rdFixGender(text, addrG, selfG) {
   if (addrG === 'f') { for (const [re, to] of RD_RE.m2f) out = out.replace(re, (m, pf) => pf + to); pred(RD_RE.p2, 'f'); }
   else if (addrG === 'm') { for (const [re, to] of RD_RE.f2m) out = out.replace(re, (m, pf) => pf + to); pred(RD_RE.p2, 'm'); }
   if (selfG === 'f' || selfG === 'm') pred(RD_RE.p1, selfG);
-  if (addrG === 'f' || addrG === 'm') out = rdNegImp(out, addrG);
+  if (addrG === 'f' || addrG === 'm') out = rdKaf(rdNegImp(out, addrG), addrG);
   return out;
+}
+// كاف المخاطَب: قولتلَك (لمذكر) ≠ قولتلِك (لمؤنث) — نشكّل الكاف حسب جنس المخاطَب بدل ما التحويل الصوتي يخمّن فتحة دايماً
+const RD_KAF_X = new Set(['ملك', 'مالك', 'سلك', 'شك', 'فك', 'حك', 'ترك', 'تحرك', 'ضحك', 'مسك', 'فلك', 'شباك', 'بنك', 'ديك', 'ذلك', 'كذلك', 'هناك', 'هنالك', 'مبروك', 'مبارك', 'تبارك', 'ملاك', 'بارك', 'اشتبك', 'سبك', 'نك', 'تك', 'كوك', 'ماك', 'بيك', 'تيك', 'يك', 'اك', 'سكك', 'حيك', 'مشترك', 'شريك', 'مدرك', 'مشارك']);
+const RD_KAF_RE = /(?<![\u0621-\u064A\u064B-\u0652])([\u0621-\u064A][\u064B-\u0652\u0621-\u064A]*?)ك[\u064E\u064F\u0650]?(?=ش(?![\u0621-\u064A])|(?![\u0621-\u064A\u064B-\u0652]))/g;
+function rdKaf(text, g) {
+  const v = g === 'f' ? '\u0650' : '\u064E';
+  return text.replace(RD_KAF_RE, (m, w) => {
+    const full = w + 'ك', pl = full.replace(/[\u064B-\u0652]/g, '');
+    if (pl.length < 2 || RD_KAF_X.has(pl) || /^(?:ال|وال|بال|لل|فال)/.test(pl) || /^ك/.test(pl) && pl.length < 4) return m;
+    if (g === 'f' && /ي$/.test(w.replace(/[\u064B-\u0652]/g, ''))) return m; // ليكي/عليكي بتشتغل لوحدها
+    return full + v;
+  }).replace(/ك[\u064E\u0650]?(?=ش(?![\u0621-\u064A]))/g, 'ك' + v);
 }
 // نهي مؤنث/مذكر (متتسرعيش ↔ متتسرعش): قاعدة صرفية عامة بدل قايمة كلمات، مع استثناء الأفعال الناقصة (متنساش/متجيش…)
 const RD_NI_X = new Set(['متنس', 'متبك', 'متج', 'متجي', 'متحك', 'ماتنس', 'ماتج', 'ماتجي']);
@@ -2119,6 +2131,7 @@ const rdEgy = (seg, conf) => seg.type === 'dialogue' || (conf.rd || RD_DEF).mode
 const rdScript = (seg, conf) => {
   let s = rdEgy(seg, conf) ? applyEgyptianPhonetics((seg.phoneticText && seg.phoneticText.trim()) || seg.text, rdDict(conf)) : applyAllahPronunciation(seg.text);
   if (rdEgy(seg, conf) && (conf.rd || RD_DEF).tashkeel === 0) s = s.replace(/[\u064B-\u0652\u0670]/g, ''); // وضع «من غير تشكيل»: الكلام بالرسم المصري بس
+  if (rdEgy(seg, conf) && (seg.addr === 'm' || seg.addr === 'f')) s = rdKaf(s, seg.addr); // كاف المخاطَب تفضل مشكّلة حتى في وضع «من غير تشكيل»
   if ((conf.rd || RD_DEF).humanize && (seg.emotionId === 'fear_whisper' || seg.emotionId === 'crying_sad')) s = s.replace(/\.\./g, '... ');
   return s;
 };
