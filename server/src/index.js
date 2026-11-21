@@ -1811,7 +1811,7 @@ function rdFixGender(text, addrG, selfG) {
   if (addrG === 'f') { for (const [re, to] of RD_RE.m2f) out = out.replace(re, (m, pf) => pf + to); pred(RD_RE.p2, 'f'); }
   else if (addrG === 'm') { for (const [re, to] of RD_RE.f2m) out = out.replace(re, (m, pf) => pf + to); pred(RD_RE.p2, 'm'); }
   if (selfG === 'f' || selfG === 'm') pred(RD_RE.p1, selfG);
-  if (addrG === 'f' || addrG === 'm') out = rdKaf(rdNegImp(out, addrG), addrG);
+  if (addrG === 'f' || addrG === 'm') out = rdSubj(rdKaf(rdNegImp(out, addrG), addrG), addrG);
   return out;
 }
 // كاف المخاطَب: قولتلَك (لمذكر) ≠ قولتلِك (لمؤنث) — نشكّل الكاف حسب جنس المخاطَب بدل ما التحويل الصوتي يخمّن فتحة دايماً
@@ -1827,6 +1827,21 @@ function rdKaf(text, g) { // الحركة بتتحط على الحرف اللي 
     if (/[اوىي]/.test(mm[2])) return full; // حرف مد قبل الكاف (معاك/عليك): مفيش مكان للحركة
     return mm[1] + mm[2] + (mm[3].includes('\u0651') ? '\u0651' : '') + v + 'ك';
   });
+}
+// «ذكي»: أي صيغة بتفرّق بين المخاطَب والمخاطَبة بالحركة بس → كسرة للأنثى وفتحة للراجل
+// (إنتَ/إنتِ، وفعل الماضي بعد إنت: عملتَ/عملتِ، قلتَ/قلتِ)
+const RD_SUBJ_X = new Set(['بنت', 'ست', 'وقت', 'اخت', 'أخت', 'صوت', 'بيت', 'موت', 'زيت', 'كبت', 'مثلت', 'نت', 'ثبت', 'خت', 'امت', 'إمت', 'سكت']);
+function rdSubj(text, g) {
+  const v = g === 'f' ? '\u0650' : '\u064E', L = '[\\u0621-\\u064A]', D = '[\\u064B-\\u0652]';
+  const pron = new RegExp('(?<!' + L + D + '*)([وف]?[إأا][\\u064B-\\u0652]?ن)ت' + D + '*(?![' + '\\u0621-\\u064A\\u064B-\\u0652' + '])', 'g');
+  let out = text.replace(pron, (m, a) => a + 'ت' + v);
+  const verb = new RegExp('([إأا]نت' + D + '\\s+(?:(?:مش|لسه|لسة|كمان|فعلا|فعلاً|ليه|إزاي|امبارح|دلوقتي)\\s+)*)(' + L + '(?:' + L + D + '*){1,}?)ت' + D + '*(?![\\u0621-\\u064A\\u064B-\\u0652])', 'g');
+  out = out.replace(verb, (m, pre, w) => {
+    const pl = (w + 'ت').replace(/[\u064B-\u0652]/g, '');
+    if (RD_SUBJ_X.has(pl) || pl.length < 3 || /^ال/.test(pl)) return m;
+    return pre + w + 'ت' + v;
+  });
+  return out;
 }
 // نهي مؤنث/مذكر (متتسرعيش ↔ متتسرعش): قاعدة صرفية عامة بدل قايمة كلمات، مع استثناء الأفعال الناقصة (متنساش/متجيش…)
 const RD_NI_X = new Set(['متنس', 'متبك', 'متج', 'متجي', 'متحك', 'ماتنس', 'ماتج', 'ماتجي']);
