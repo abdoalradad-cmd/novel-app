@@ -3860,18 +3860,23 @@ async function route(request, env) {
       const b = await body(request, 9000), conf = await getTtsConf(env); RD_CF = conf.rd || RD_DEF;
       const text = String(b.text || '').replace(/\r/g, '').trim().slice(0, 3000); if (text.replace(/\s/g, '').length < 2) return fail('اكتب النص الأول');
       const pr = rdPers(String(b.pid || 'kareem')), egy = b.mode !== 'msa';
-      const sp = PROVS.find((x) => isGoogle(x) && gemKey(env, x)); if (!sp) return fail('مفيش مفتاح جوجل متسجّل', 503);
+      const sps = PROVS.filter((x) => isGoogle(x) && gemKey(env, x)); if (!sps.length) return fail('مفيش مفتاح جوجل متسجّل', 503);
       const chunks = []; { let cur = ''; for (const piece of text.split(/(?<=[.!؟?…\n])\s*/)) { if (cur && (cur + piece).length > 450) { chunks.push(cur.trim()); cur = ''; } cur += piece + ' '; } if (cur.trim()) chunks.push(cur.trim()); }
       const ce = { ...conf, rd: { ...RD_CF, mode: egy ? 'A' : 'B' } }, narr = /^narrator/.test(pr.a);
-      try {
-        const out = new Array(chunks.length); let nx = 0;
-        await Promise.all(Array.from({ length: Math.min(2, chunks.length) }, async () => { while (nx < chunks.length) { const i = nx++; out[i] = await rdSpeak(gemEnv(env, sp), { text: chunks[i], type: egy ? 'dialogue' : 'narration', emotionId: narr ? 'dramatic_narrator' : 'natural_dialogue' }, pr, ce); } }));
-        const gap = new Int16Array(Math.round(24000 * 0.25)); let n = 0; out.forEach((q, i) => { n += q.length + (i ? gap.length : 0); });
-        const all = new Int16Array(n); let o = 0; out.forEach((q, i) => { if (i) o += gap.length; all.set(q, o); o += q.length; });
-        const wav = pcmToWav(new Uint8Array(all.buffer), 24000), secs = (wav.length - 44) / 48000;
-        try { await ttsBump(env, sp, { reqs: chunks.length, chars: text.length, secs, cost: ttsCost(text.length, secs, conf) }); } catch (e) {}
-        return new Response(wav, { headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Secs': String(Math.round(secs)) } });
-      } catch (e) { return fail(e.detail || e.message || 'فشل التحويل', e.code || 502); }
+      let lastErr = null;
+      for (const sp of sps) { // لو مفتاح حساب بايظ (401/403) بنجرّب الحساب اللي بعده
+        try {
+          const out = new Array(chunks.length); let nx = 0;
+          await Promise.all(Array.from({ length: Math.min(2, chunks.length) }, async () => { while (nx < chunks.length) { const i = nx++; out[i] = await rdSpeak(gemEnv(env, sp), { text: chunks[i], type: egy ? 'dialogue' : 'narration', emotionId: narr ? 'dramatic_narrator' : 'natural_dialogue' }, pr, ce); } }));
+          const gap = new Int16Array(Math.round(24000 * 0.25)); let n = 0; out.forEach((q, i) => { n += q.length + (i ? gap.length : 0); });
+          const all = new Int16Array(n); let o = 0; out.forEach((q, i) => { if (i) o += gap.length; all.set(q, o); o += q.length; });
+          const wav = pcmToWav(new Uint8Array(all.buffer), 24000), secs = (wav.length - 44) / 48000;
+          try { await ttsBump(env, sp, { reqs: chunks.length, chars: text.length, secs, cost: ttsCost(text.length, secs, conf) }); } catch (e) {}
+          return new Response(wav, { headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Secs': String(Math.round(secs)) } });
+        } catch (e) { lastErr = e; if (!/gemini_(401|403|429)/.test(String(e.message))) break; }
+      }
+      const em = String((lastErr && lastErr.message) || '');
+      return fail(/gemini_40[13]/.test(em) ? 'مفتاح جوجل مرفوض (' + em + ') — حدّث المفتاح من تابة أداة الرداد' : (lastErr && (lastErr.detail || lastErr.message)) || 'فشل التحويل', (lastErr && lastErr.code) || 502);
     }
     if (path === '/api/admin/rd/sample' && m === 'POST') {
       const b = await body(request, 2000), conf = await getTtsConf(env); RD_CF = conf.rd || RD_DEF; const pr = rdPers(String(b.pid || 'kareem'));
