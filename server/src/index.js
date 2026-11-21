@@ -3855,6 +3855,24 @@ async function route(request, env) {
     if (path === '/api/admin/rd/learned' && m === 'DELETE') { const b = await body(request, 2000); const d = (await getSetting(env, 'rd_learned')) || {}; delete d[String(b.word || '')]; await setSetting(env, 'rd_learned', d); RD_LEARN = d; return json({ ok: true }); }
     if (path === '/api/admin/rd/learned-export' && m === 'GET') { const d = (await getSetting(env, 'rd_learned')) || {}; return json({ total: Object.keys(d).length, words: d }); }
     if (path === '/api/admin/rd/learned-import' && m === 'POST') { const b = await body(request, 2000000), clean = {}; Object.entries((b && b.words) || {}).forEach(([k, v]) => { const key = stripDiacritics(String(k)); if (key && !/\s/.test(key) && typeof v === 'string' && v !== key && stripDiacritics(v) === key && v.length <= key.length * 2 + 4) clean[key] = v; }); const n = await rdLearnMerge(env, clean, 'import'); return json({ n }); }
+    if (path === '/api/admin/vc/voices' && m === 'GET') { const conf = await getTtsConf(env); RD_CF = conf.rd || RD_DEF; return json({ voices: RD_P.map((x) => { const q = rdPers(x.id); return { id: x.id, n: x.n, a: x.a, i: x.i, g: rdGen(x.id) }; }) }); }
+    if (path === '/api/admin/vc/convert' && m === 'POST') { // تحويل نص حر بصوت شخصية واحدة — بيرجّع الصوت مباشرة وما بيتخزّنش في أي مكان
+      const b = await body(request, 9000), conf = await getTtsConf(env); RD_CF = conf.rd || RD_DEF;
+      const text = String(b.text || '').replace(/\r/g, '').trim().slice(0, 3000); if (text.replace(/\s/g, '').length < 2) return fail('اكتب النص الأول');
+      const pr = rdPers(String(b.pid || 'kareem')), egy = b.mode !== 'msa';
+      const sp = PROVS.find((x) => isGoogle(x) && gemKey(env, x)); if (!sp) return fail('مفيش مفتاح جوجل متسجّل', 503);
+      const chunks = []; { let cur = ''; for (const piece of text.split(/(?<=[.!؟?…\n])\s*/)) { if (cur && (cur + piece).length > 450) { chunks.push(cur.trim()); cur = ''; } cur += piece + ' '; } if (cur.trim()) chunks.push(cur.trim()); }
+      const ce = { ...conf, rd: { ...RD_CF, mode: egy ? 'A' : 'B' } }, narr = /^narrator/.test(pr.a);
+      try {
+        const out = new Array(chunks.length); let nx = 0;
+        await Promise.all(Array.from({ length: Math.min(2, chunks.length) }, async () => { while (nx < chunks.length) { const i = nx++; out[i] = await rdSpeak(gemEnv(env, sp), { text: chunks[i], type: egy ? 'dialogue' : 'narration', emotionId: narr ? 'dramatic_narrator' : 'natural_dialogue' }, pr, ce); } }));
+        const gap = new Int16Array(Math.round(24000 * 0.25)); let n = 0; out.forEach((q, i) => { n += q.length + (i ? gap.length : 0); });
+        const all = new Int16Array(n); let o = 0; out.forEach((q, i) => { if (i) o += gap.length; all.set(q, o); o += q.length; });
+        const wav = pcmToWav(new Uint8Array(all.buffer), 24000), secs = (wav.length - 44) / 48000;
+        try { await ttsBump(env, sp, { reqs: chunks.length, chars: text.length, secs, cost: ttsCost(text.length, secs, conf) }); } catch (e) {}
+        return new Response(wav, { headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Secs': String(Math.round(secs)) } });
+      } catch (e) { return fail(e.detail || e.message || 'فشل التحويل', e.code || 502); }
+    }
     if (path === '/api/admin/rd/sample' && m === 'POST') {
       const b = await body(request, 2000), conf = await getTtsConf(env); RD_CF = conf.rd || RD_DEF; const pr = rdPers(String(b.pid || 'kareem'));
       const SAM = { young_male: 'يا عم هو أنا قلتلك إيه؟ خلاص بقى، ماتقلقش، أنا هجيبه لحد عندك النهارده.', adult_male_dramatic: 'اسمعني كويس، اللي حصل مش هيعدي كده، وأنا مش هسكت.', elder_male: 'يا ابني الدنيا مش زي ما انت فاكر، والصبر ده حلو أوي.', adult_female: 'والله يا حبيبتي أنا مستنياكي من بدري، تعالي نقعد ونتكلم.', young_female: 'إيه ده بجد؟ مش مصدقة! تعالي بسرعة أحكيلك اللي حصل.', child: 'ماما، أنا جعان أوي، هو مفيش أكل؟', narrator_male: 'وفي تلك الليلة، هبّت الريح على المدينة، وكان كل شيء ينذر بما هو آتٍ.', narrator_female: 'وفي تلك الليلة، هبّت الريح على المدينة، وكان كل شيء ينذر بما هو آتٍ.' };
