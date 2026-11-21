@@ -114,6 +114,9 @@ async function ensureSchema(env) {
     'CREATE TABLE IF NOT EXISTS read_seen (h TEXT NOT NULL, k TEXT NOT NULL, ch INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (h, k, ch))',
     "CREATE TABLE IF NOT EXISTS cmt_log (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, nid TEXT NOT NULL, ch INTEGER NOT NULL, norm TEXT NOT NULL DEFAULT '', day TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL DEFAULT 0, elig INTEGER NOT NULL DEFAULT 0, awarded INTEGER NOT NULL DEFAULT 0)",
     'CREATE INDEX IF NOT EXISTS idx_cmt_uid ON cmt_log(uid, day)',
+    'CREATE INDEX IF NOT EXISTS idx_cmt_nid ON cmt_log(nid)',
+    'CREATE INDEX IF NOT EXISTS idx_cmt_norm ON cmt_log(norm)',
+    'CREATE INDEX IF NOT EXISTS idx_votes_nid ON pts_votes(nid)',
     'CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, author_id INTEGER NOT NULL, kind TEXT NOT NULL, novel_id INTEGER NOT NULL, title TEXT NOT NULL, ts INTEGER NOT NULL)',
     'CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)',
     'CREATE TABLE IF NOT EXISTS sessions (uid INTEGER NOT NULL, dev TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (uid, dev))',
@@ -2849,17 +2852,23 @@ async function route(request, env) {
     return json({ chapters }, 200, { 'Cache-Control': x.password ? 'private, no-store' : 'public, max-age=300' });
   }
 
-  if (path === '/api/trending' && m === 'GET') { // الرائجة: مجموع التصويت + التعليقات لكل رواية
+  if (path === '/api/trending' && m === 'GET') { // الرائجة: مجموع التصويت + التعليقات لكل رواية (مخزّنة 5 دقايق في الذاكرة لتقليل القراءات)
+    const hit = globalThis.__trend;
+    if (hit && Date.now() - hit.t < 300000) return json(hit.v, 200, { 'Cache-Control': 'public, max-age=120' });
     const o = {};
     try { const { results: vs } = await env.DB.prepare('SELECT nid, COUNT(*) AS n FROM pts_votes GROUP BY nid').all(); vs.forEach((r) => { (o[r.nid] = o[r.nid] || { v: 0, c: 0 }).v = r.n; }); } catch (e) {}
     try { const { results: cs } = await env.DB.prepare('SELECT nid, COUNT(*) AS n FROM cmt_log GROUP BY nid').all(); cs.forEach((r) => { (o[r.nid] = o[r.nid] || { v: 0, c: 0 }).c = r.n; }); } catch (e) {}
     const top = Object.entries(o).sort((x, y) => (y[1].v + y[1].c) - (x[1].v + x[1].c)).slice(0, 300), out = {}; top.forEach(([k, v]) => { out[k] = v; });
-    return json({ scores: out }, 200, { 'Cache-Control': 'public, max-age=60' });
+    const val = { scores: out }; globalThis.__trend = { t: Date.now(), v: val };
+    return json(val, 200, { 'Cache-Control': 'public, max-age=120' });
   }
   if (path === '/api/reads' && m === 'GET') {
+    const hit = globalThis.__reads;
+    if (hit && Date.now() - hit.t < 60000) return json(hit.v, 200, { 'Cache-Control': 'public, max-age=60' });
     const { results } = await env.DB.prepare('SELECT k,n FROM reads ORDER BY n DESC LIMIT 1000').all();
     const o = {}; results.forEach((r) => { o[r.k] = r.n; });
-    return json({ reads: o, epoch: ((await getSetting(env, 'reads_epoch')) || {}).t || 0 }, 200, { 'Cache-Control': 'public, max-age=20' });
+    const val = { reads: o, epoch: ((await getSetting(env, 'reads_epoch')) || {}).t || 0 }; globalThis.__reads = { t: Date.now(), v: val };
+    return json(val, 200, { 'Cache-Control': 'public, max-age=60' });
   }
   if (path === '/api/reads' && m === 'POST') {
     const b = await body(request, 2000), k = str(b.k, 60), ch = Number.isInteger(+b.ch) ? Math.max(0, Math.min(9999, +b.ch)) : -1;
@@ -2867,6 +2876,7 @@ async function route(request, env) {
     if (await tooMany(env, 'rdip:' + ip, 80, 3600000)) return json({ ok: true, skipped: true });
     const ins = await env.DB.prepare('INSERT OR IGNORE INTO read_seen (h,k,ch,ts) VALUES (?,?,?,?)').bind(fnv(ip), k, ch, Date.now()).run();
     if (!(ins && ins.meta && ins.meta.changes)) return json({ ok: true, dup: true });
+    globalThis.__reads = null;
     await noteAttempt(env, 'rdip:' + ip);
     await env.DB.prepare('INSERT INTO reads (k,n) VALUES (?,1) ON CONFLICT(k) DO UPDATE SET n=n+1').bind(k).run();
     return json({ ok: true });
@@ -3621,7 +3631,7 @@ async function route(request, env) {
       const c1 = await env.DB.prepare('SELECT COALESCE(SUM(n),0) AS s FROM reads').first();
       await env.DB.prepare('DELETE FROM reads').run();
       await env.DB.prepare('DELETE FROM read_seen').run();
-      await setSetting(env, 'reads_epoch', { t: Date.now() });
+      await setSetting(env, 'reads_epoch', { t: Date.now() }); globalThis.__reads = null;
       return json({ ok: true, cleared: (c1 && c1.s) || 0 });
     }
     if (path === '/api/admin/points/draw' && m === 'POST') return json({ ok: true, ...(await ptsDraw(env, true)) });
