@@ -3005,6 +3005,34 @@ async function route(request, env) {
     return json({ ok: true });
   }
 
+  /* ----- تنزيل صوت فصل كامل (WAV واحد) برابط مؤقت للأدمن بس: بيتفتح في متصفح الموبايل فينزل مباشرة ----- */
+  if (path === '/api/tts/dl' && m === 'GET') {
+    const tk = await readToken(env, str(url.searchParams.get('k'), 400));
+    if (!tk || !tk.dl || !env.TTS_BUCKET) return fail('الرابط منتهي، اطلبه من التطبيق تاني', 403);
+    const c = await env.DB.prepare("SELECT id,nparts,ntitle,ctitle,status FROM tts_ch WHERE nid=? AND idx=?").bind(tk.dl, tk.ix).first();
+    if (!c || c.status !== 'done') return fail('الصوت لسه مش جاهز', 404);
+    const keys = []; for (let i = 0; i < c.nparts; i++) keys.push('c/' + c.id + '/' + i + '.wav');
+    const heads = await Promise.all(keys.map((k) => env.TTS_BUCKET.head(k)));
+    if (heads.some((h) => !h)) return fail('جزء من الصوت ناقص', 404);
+    const total = heads.reduce((a, h) => a + Math.max(0, h.size - 44), 0);
+    const hd = pcmToWav(new Uint8Array(0), 24000), hv = new DataView(hd.buffer); hv.setUint32(4, 36 + total, true); hv.setUint32(40, total, true);
+    let i = 0, rd = null, skip = 44; const bucket = env.TTS_BUCKET;
+    const stream = new ReadableStream({
+      start(ctl) { ctl.enqueue(hd); },
+      async pull(ctl) {
+        for (;;) {
+          if (!rd) { if (i >= keys.length) { ctl.close(); return; } const o = await bucket.get(keys[i++]); if (!o) { ctl.error(new Error('part')); return; } rd = o.body.getReader(); skip = 44; }
+          const { done, value } = await rd.read();
+          if (done) { rd = null; continue; }
+          let v = value; if (skip > 0) { const k = Math.min(skip, v.length); v = v.subarray(k); skip -= k; }
+          if (v.length) { ctl.enqueue(v); return; }
+        }
+      }
+    });
+    const nm = String((c.ntitle || 'novel') + ' - ' + (c.ctitle || ('chapter ' + tk.ix))).replace(/[\\/:*?"<>|\r\n]+/g, ' ').trim().slice(0, 120) + '.wav';
+    return new Response(stream, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Content-Length': String(44 + total), 'Content-Disposition': "attachment; filename=\"audio.wav\"; filename*=UTF-8''" + encodeURIComponent(nm), 'Cache-Control': 'private, no-store' } });
+  }
+
   /* ----- كل ما بعد كده يحتاج تسجيل دخول ----- */
   const user = await authUser(env, request);
   if (!user) return fail(devMsgs.get(request) || 'سجّل الدخول الأول', 401);
@@ -3526,6 +3554,14 @@ async function route(request, env) {
       const nid = str(url.searchParams.get('nid'), 80);
       const { results } = await env.DB.prepare('SELECT idx,ctitle,status,done,nparts,secs,err,ord,attempts,LENGTH(text) AS n FROM tts_ch WHERE nid=? ORDER BY idx').bind(nid).all();
       return json({ chapters: results });
+    }
+    if (path === '/api/admin/tts/dllink' && m === 'POST') { // رابط تنزيل مؤقت (10 دقايق) لصوت فصل جاهز
+      const b = await body(request, 400), nid = str(b.nid, 80), ix = parseInt(b.idx, 10);
+      const c = await env.DB.prepare("SELECT status FROM tts_ch WHERE nid=? AND idx=?").bind(nid, ix).first();
+      if (!c || c.status !== 'done') return fail('صوت الفصل ده لسه مش جاهز', 404);
+      const bd = b64u(enc.encode(JSON.stringify({ dl: nid, ix, exp: Date.now() + 600000 })));
+      const sg = await crypto.subtle.sign('HMAC', await getKey(env), enc.encode(bd));
+      return json({ url: new URL(request.url).origin + '/api/tts/dl?k=' + encodeURIComponent(bd + '.' + b64u(sg)) });
     }
     if (path === '/api/admin/tts/ch' && m === 'POST') {
       const b = await body(request, 600), nid = str(b.nid, 80), ix = parseInt(b.idx, 10), op = String(b.op || '');
