@@ -1811,7 +1811,23 @@ function rdFixGender(text, addrG, selfG) {
   if (addrG === 'f') { for (const [re, to] of RD_RE.m2f) out = out.replace(re, (m, pf) => pf + to); pred(RD_RE.p2, 'f'); }
   else if (addrG === 'm') { for (const [re, to] of RD_RE.f2m) out = out.replace(re, (m, pf) => pf + to); pred(RD_RE.p2, 'm'); }
   if (selfG === 'f' || selfG === 'm') pred(RD_RE.p1, selfG);
+  if (addrG === 'f' || addrG === 'm') out = rdNegImp(out, addrG);
   return out;
+}
+// نهي مؤنث/مذكر (متتسرعيش ↔ متتسرعش): قاعدة صرفية عامة بدل قايمة كلمات، مع استثناء الأفعال الناقصة (متنساش/متجيش…)
+const RD_NI_X = new Set(['متنس', 'متبك', 'متج', 'متجي', 'متحك', 'ماتنس', 'ماتج', 'ماتجي']);
+const RD_NI_AR = '[\\u0621-\\u063A\\u0641-\\u064A]';
+const RD_NI_F = new RegExp('(?<!' + RD_NI_AR + '[\\u064B-\\u0652]*)((?:م|ما)[\\u064B-\\u0652]*ت[\\u064B-\\u0652]*(?:' + RD_NI_AR + '[\\u064B-\\u0652]*){1,})ي[\\u064B-\\u0652]*ش(?!' + RD_NI_AR + ')', 'g');
+const RD_NI_M = new RegExp('(?<!' + RD_NI_AR + '[\\u064B-\\u0652]*)((?:م|ما)[\\u064B-\\u0652]*ت[\\u064B-\\u0652]*(?:' + RD_NI_AR + '[\\u064B-\\u0652]*){1,})ش(?!' + RD_NI_AR + ')', 'g');
+function rdNegImp(text, g) {
+  text = g === 'm' ? text.replace(/(?<![\u0621-\u064A])متنسيش(?![\u0621-\u064A])/g, 'متنساش').replace(/(?<![\u0621-\u064A])اتنسيش(?![\u0621-\u064A])/g, 'اتنساش') : text.replace(/(?<![\u0621-\u064A])متنساش(?![\u0621-\u064A])/g, 'متنسيش');
+  const plain = (x) => x.replace(/[\u064B-\u0652]/g, '');
+  return text.replace(g === 'm' ? RD_NI_F : RD_NI_M, (m, stem) => {
+    const ps = plain(stem), last = ps.slice(-1);
+    if (RD_NI_X.has(ps) || ps.length < 4) return m;
+    if (g === 'f') { if (/[اىيو]/.test(last)) return m; return stem.replace(/[\u064B-\u0652]+$/, '') + 'يش'; }
+    return stem.replace(/[\u064B-\u0652]+$/, '') + 'ش';
+  });
 }
 function adaptDialogueToAddressee(text, addresseeCategory) {
   if (!text || !addresseeCategory) return text;
