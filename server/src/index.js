@@ -3855,28 +3855,37 @@ async function route(request, env) {
     if (path === '/api/admin/rd/learned' && m === 'DELETE') { const b = await body(request, 2000); const d = (await getSetting(env, 'rd_learned')) || {}; delete d[String(b.word || '')]; await setSetting(env, 'rd_learned', d); RD_LEARN = d; return json({ ok: true }); }
     if (path === '/api/admin/rd/learned-export' && m === 'GET') { const d = (await getSetting(env, 'rd_learned')) || {}; return json({ total: Object.keys(d).length, words: d }); }
     if (path === '/api/admin/rd/learned-import' && m === 'POST') { const b = await body(request, 2000000), clean = {}; Object.entries((b && b.words) || {}).forEach(([k, v]) => { const key = stripDiacritics(String(k)); if (key && !/\s/.test(key) && typeof v === 'string' && v !== key && stripDiacritics(v) === key && v.length <= key.length * 2 + 4) clean[key] = v; }); const n = await rdLearnMerge(env, clean, 'import'); return json({ n }); }
+    if (path === '/api/admin/vc/keys') { // مفاتيح مخصوصة لتابة «تحويل نص» بس (بتتبدّل تلقائي لو واحد اتزحم أو اتحظر)
+      const cur = (((await getSetting(env, 'vc_keys')) || {}).list || []).filter((k) => typeof k === 'string');
+      const mask = (k) => k.slice(0, 6) + '…' + k.slice(-4);
+      if (m === 'GET') return json({ keys: cur.map(mask) });
+      const b = await body(request, 4000);
+      if (m === 'POST') { const add = String(b.keys || '').split(/[\s,;]+/).filter((k) => k.length > 15 && k.length < 120); const list = [...new Set([...cur, ...add])].slice(0, 30); await setSetting(env, 'vc_keys', { list }); return json({ keys: list.map(mask), added: list.length - cur.length }); }
+      if (m === 'DELETE') { const i = parseInt(b.i, 10); if (!(i >= 0 && i < cur.length)) return fail('مفتاح غير موجود', 404); cur.splice(i, 1); await setSetting(env, 'vc_keys', { list: cur }); return json({ keys: cur.map(mask) }); }
+    }
     if (path === '/api/admin/vc/voices' && m === 'GET') { const conf = await getTtsConf(env); RD_CF = conf.rd || RD_DEF; return json({ voices: RD_P.map((x) => { const q = rdPers(x.id); return { id: x.id, n: x.n, a: x.a, i: x.i, g: rdGen(x.id) }; }) }); }
     if (path === '/api/admin/vc/convert' && m === 'POST') { // تحويل نص حر بصوت شخصية واحدة — بيرجّع الصوت مباشرة وما بيتخزّنش في أي مكان
       const b = await body(request, 9000), conf = await getTtsConf(env); RD_CF = conf.rd || RD_DEF;
       const text = String(b.text || '').replace(/\r/g, '').trim().slice(0, 3000); if (text.replace(/\s/g, '').length < 2) return fail('اكتب النص الأول');
       const pr = rdPers(String(b.pid || 'kareem')), egy = b.mode !== 'msa';
-      const sps = PROVS.filter((x) => isGoogle(x) && gemKey(env, x)); if (!sps.length) return fail('مفيش مفتاح جوجل متسجّل', 503);
+      const vk = (((await getSetting(env, 'vc_keys')) || {}).list || []).filter((k) => String(k).length > 15);
+      const sps = vk.length ? ['vc'] : PROVS.filter((x) => isGoogle(x) && gemKey(env, x)); if (!sps.length) return fail('مفيش مفتاح متسجّل — ضيف مفتاح من التابة نفسها', 503);
       const chunks = []; { let cur = ''; for (const piece of text.split(/(?<=[.!؟?…\n])\s*/)) { if (cur && (cur + piece).length > 450) { chunks.push(cur.trim()); cur = ''; } cur += piece + ' '; } if (cur.trim()) chunks.push(cur.trim()); }
       const ce = { ...conf, rd: { ...RD_CF, mode: egy ? 'A' : 'B' } }, narr = /^narrator/.test(pr.a);
       let lastErr = null;
       for (const sp of sps) { // لو مفتاح حساب بايظ (401/403) بنجرّب الحساب اللي بعده
         try {
           const out = new Array(chunks.length); let nx = 0;
-          await Promise.all(Array.from({ length: Math.min(2, chunks.length) }, async () => { while (nx < chunks.length) { const i = nx++; out[i] = await rdSpeak(gemEnv(env, sp), { text: chunks[i], type: egy ? 'dialogue' : 'narration', emotionId: narr ? 'dramatic_narrator' : 'natural_dialogue' }, pr, ce); } }));
+          await Promise.all(Array.from({ length: Math.min(2, chunks.length) }, async () => { while (nx < chunks.length) { const i = nx++; out[i] = await rdSpeak(sp === 'vc' ? { ...env, GEMINI_API_KEY: vk.join(',') } : gemEnv(env, sp), { text: chunks[i], type: egy ? 'dialogue' : 'narration', emotionId: narr ? 'dramatic_narrator' : 'natural_dialogue' }, pr, ce); } }));
           const gap = new Int16Array(Math.round(24000 * 0.25)); let n = 0; out.forEach((q, i) => { n += q.length + (i ? gap.length : 0); });
           const all = new Int16Array(n); let o = 0; out.forEach((q, i) => { if (i) o += gap.length; all.set(q, o); o += q.length; });
           const wav = pcmToWav(new Uint8Array(all.buffer), 24000), secs = (wav.length - 44) / 48000;
-          try { await ttsBump(env, sp, { reqs: chunks.length, chars: text.length, secs, cost: ttsCost(text.length, secs, conf) }); } catch (e) {}
+          if (sp !== 'vc') { try { await ttsBump(env, sp, { reqs: chunks.length, chars: text.length, secs, cost: ttsCost(text.length, secs, conf) }); } catch (e) {} }
           return new Response(wav, { headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Secs': String(Math.round(secs)) } });
         } catch (e) { lastErr = e; if (!/gemini_(401|403|429)/.test(String(e.message))) break; }
       }
       const em = String((lastErr && lastErr.message) || '');
-      return fail(/gemini_40[13]/.test(em) ? 'مفتاح جوجل مرفوض (' + em + ') — حدّث المفتاح من تابة أداة الرداد' : (lastErr && (lastErr.detail || lastErr.message)) || 'فشل التحويل', (lastErr && lastErr.code) || 502);
+      return fail(/gemini_40[13]/.test(em) ? 'مفتاح جوجل مرفوض (' + em + ') — بدّل/ضيف مفاتيح من خانة «مفاتيح التابة دي»' : (lastErr && (lastErr.detail || lastErr.message)) || 'فشل التحويل', (lastErr && lastErr.code) || 502);
     }
     if (path === '/api/admin/rd/sample' && m === 'POST') {
       const b = await body(request, 2000), conf = await getTtsConf(env); RD_CF = conf.rd || RD_DEF; const pr = rdPers(String(b.pid || 'kareem'));
