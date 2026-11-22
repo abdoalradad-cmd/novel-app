@@ -4,6 +4,9 @@ import android.app.Application;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.media.AudioManager;
+import android.media.AudioPlaybackConfiguration;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -229,9 +232,77 @@ public class AppNativePlugin extends Plugin {
 
     private boolean lifecycleHooked = false;
 
+    private AudioManager.AudioPlaybackCallback apc;
+    private Runnable stopTask;
+    private final Handler mainH = new Handler(Looper.getMainLooper());
+
     @Override
     public void load() {
         PlaybackService.sink = this;
+        mainH.post(new Runnable() {
+            @Override
+            public void run() {
+                hookLifecycle();
+                watchAudio();
+            }
+        });
+    }
+
+    /** بيراقب صوت التطبيق نفسه: أول ما يبدأ تشغيل صوت بيشغّل الخدمة والإشعار (من غير ما نعتمد على الصفحة)، وبعد ما الصوت يقف 25 ثانية بيقفلهم */
+    private void watchAudio() {
+        if (Build.VERSION.SDK_INT < 26 || apc != null) return;
+        try {
+            AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+            if (am == null) return;
+            apc = new AudioManager.AudioPlaybackCallback() {
+                @Override
+                public void onPlaybackConfigChanged(List<AudioPlaybackConfiguration> configs) {
+                    boolean on = configs != null && !configs.isEmpty();
+                    if (on) {
+                        if (stopTask != null) { mainH.removeCallbacks(stopTask); stopTask = null; }
+                        if (!PlaybackService.active) startMedia("RadPad", "جاري تشغيل الصوت", true);
+                    } else if (PlaybackService.active && stopTask == null) {
+                        stopTask = new Runnable() {
+                            @Override
+                            public void run() {
+                                stopTask = null;
+                                try { Context c = getContext(); c.stopService(new Intent(c, PlaybackService.class)); } catch (Throwable e) { }
+                            }
+                        };
+                        mainH.postDelayed(stopTask, 25000);
+                    }
+                }
+            };
+            am.registerAudioPlaybackCallback(apc, mainH);
+        } catch (Throwable e) { }
+    }
+
+    private void startMedia(String title, String sub, boolean playing) {
+        try {
+            Context c = getContext();
+            Intent i = new Intent(c, PlaybackService.class);
+            i.setAction(PlaybackService.A_SHOW);
+            i.putExtra("t", title);
+            i.putExtra("s", sub);
+            i.putExtra("p", playing);
+            ContextCompat.startForegroundService(c, i);
+        } catch (Throwable e) { }
+    }
+
+    private void hookLifecycle() {
+        if (lifecycleHooked || getActivity() == null) return;
+        lifecycleHooked = true;
+        try {
+            getActivity().getApplication().registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
+                @Override public void onActivityPaused(Activity a) { if (PlaybackService.active) keepWebViewAlive(); }
+                @Override public void onActivityStopped(Activity a) { if (PlaybackService.active) keepWebViewAlive(); }
+                @Override public void onActivityCreated(Activity a, Bundle b) { }
+                @Override public void onActivityStarted(Activity a) { }
+                @Override public void onActivityResumed(Activity a) { }
+                @Override public void onActivitySaveInstanceState(Activity a, Bundle b) { }
+                @Override public void onActivityDestroyed(Activity a) { }
+            });
+        } catch (Throwable e) { lifecycleHooked = false; }
     }
 
     /** بتتندهي من الخدمة لما المستخدم يدوس زر في الإشعار */
@@ -259,28 +330,10 @@ public class AppNativePlugin extends Plugin {
 
     @PluginMethod
     public void mediaShow(final PluginCall call) {
-        try {
-            Context c = getContext();
-            Intent i = new Intent(c, PlaybackService.class);
-            i.setAction(PlaybackService.A_SHOW);
-            i.putExtra("t", call.getString("title", "RadPad"));
-            i.putExtra("s", call.getString("sub", ""));
-            Boolean pl = call.getBoolean("playing", true);
-            i.putExtra("p", pl == null ? true : pl.booleanValue());
-            ContextCompat.startForegroundService(c, i);
-            if (!lifecycleHooked && getActivity() != null) {
-                lifecycleHooked = true;
-                getActivity().getApplication().registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
-                    @Override public void onActivityPaused(Activity a) { if (PlaybackService.active) keepWebViewAlive(); }
-                    @Override public void onActivityStopped(Activity a) { if (PlaybackService.active) keepWebViewAlive(); }
-                    @Override public void onActivityCreated(Activity a, Bundle b) { }
-                    @Override public void onActivityStarted(Activity a) { }
-                    @Override public void onActivityResumed(Activity a) { }
-                    @Override public void onActivitySaveInstanceState(Activity a, Bundle b) { }
-                    @Override public void onActivityDestroyed(Activity a) { }
-                });
-            }
-        } catch (Throwable e) { }
+        Boolean pl = call.getBoolean("playing", true);
+        if (stopTask != null) { mainH.removeCallbacks(stopTask); stopTask = null; }
+        startMedia(call.getString("title", "RadPad"), call.getString("sub", ""), pl == null ? true : pl.booleanValue());
+        hookLifecycle();
         call.resolve();
     }
 
