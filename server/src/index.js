@@ -2405,7 +2405,7 @@ async function ttsRebalance(env, per = 2) {
   const { results } = await env.DB.prepare("SELECT nid,MAX(prov) AS prov,MIN(ord) AS o,COUNT(*) AS n,SUM(status='done') AS d,SUM(status='running') AS r,SUM(status IN ('queued','running')) AS pend FROM tts_ch GROUP BY nid").all();
   if (!results.length) return [];
   const now = Date.now(), pend = {}, paused = {};
-  for (const p of PROVS) { pend[p] = 0; const st = await getSetting(env, stKey(p)); paused[p] = (st.pausedUntil || 0) > now; }
+  for (const p of PROVS) { pend[p] = 0; const st = await getSetting(env, stKey(p)); paused[p] = (st.pausedUntil || 0) > now || !!st.manualOff; }
   results.forEach((r) => { pend[r.prov] = (pend[r.prov] || 0) + (r.pend || 0); });
   const idle = PROVS.filter((p) => pend[p] === 0 && !paused[p] && provReady(env, conf, p) && provCap(conf, p) > 0);
   const moved = [];
@@ -2447,6 +2447,7 @@ async function ttsStep0(env, opts = {}) {
   const prov = normProv(opts.prov), conf = await getTtsConf(env);
   if (!provReady(env, conf, prov)) return { ok: false, idle: 'not_configured', prov };
   const now = Date.now(), key = stKey(prov), st = await getSetting(env, key);
+  if (st.manualOff) return { ok: true, idle: 'paused', prov };
   if (st.pausedUntil && st.pausedUntil > now && !opts.force) return { ok: true, idle: 'paused', prov };
   const u = await env.DB.prepare('SELECT secs FROM tts_use WHERE day=? AND prov=?').bind(dayKey(), prov).first();
   let used = u ? u.secs : 0; const cap = provCapE(env, conf, prov) * 60, par = provPar(conf, prov);
@@ -2526,7 +2527,7 @@ async function pubPickProv(env, conf, nid) {
   const now = Date.now(); let best = null;
   for (const p of PROVS.filter((x) => /^rd\d$/.test(x))) {
     if (!provReady(env, conf, p) || provCap(conf, p) <= 0) continue;
-    const st = await getSetting(env, stKey(p)); if ((st.pausedUntil || 0) > now) continue;
+    const st = await getSetting(env, stKey(p)); if ((st.pausedUntil || 0) > now || st.manualOff) continue;
     const n = (await env.DB.prepare("SELECT COUNT(*) AS n FROM tts_ch WHERE prov=? AND status IN ('queued','running')").bind(p).first()).n;
     if (!best || n < best.n) best = { p, n };
   }
@@ -2587,7 +2588,7 @@ async function ttsStats(env) {
     const ch = { queued: 0, running: 0, done: 0, failed: 0 }; q.results.filter((r) => r.prov === prov).forEach((r) => (ch[r.status] = r.n));
     const remChars = Math.round(novels.filter((r) => r.prov === prov).reduce((a, r) => a + (r.rem || 0), 0)), remSecs = remChars / CPS;
     const cap = provCapE(env, conf, prov) * 60;
-    const o = { last: await getSetting(env, 'tts_last_' + prov), today, month, chapters: ch, pausedUntil: st.pausedUntil || 0, limMsg: st.limMsg || '', limDaily: !!st.limDaily, exhaustedAt: st.exhaustedAt || 0, dailyMin: cap / 60, usedTodayPct: cap ? Math.min(999, Math.round(today.secs / cap * 100)) : 100 };
+    const o = { last: await getSetting(env, 'tts_last_' + prov), today, month, chapters: ch, manualOff: !!st.manualOff, pausedUntil: st.pausedUntil || 0, limMsg: st.limMsg || '', limDaily: !!st.limDaily, exhaustedAt: st.exhaustedAt || 0, dailyMin: cap / 60, usedTodayPct: cap ? Math.min(999, Math.round(today.secs / cap * 100)) : 100 };
     {
       const fm = gcf(conf, prov).freeMin, freeSecs = fm * 60, extraSecs = Math.max(0, today.secs - freeSecs);
       o.freeMin = fm; o.freeUsedPct = freeSecs ? Math.min(999, Math.round(today.secs / freeSecs * 100)) : null; o.extraCostToday = freeSecs ? (extraSecs * 25 * pr.outP) / 1e6 : null;
@@ -3621,6 +3622,29 @@ async function route(request, env) {
       const st = act.map((x, k) => env.DB.prepare('UPDATE tts_ch SET ord=? WHERE nid=?').bind(base + k * 10, x));
       for (let i = 0; i < st.length; i += 40) await env.DB.batch(st.slice(i, i + 40));
       return json({ ok: true, ...(await ttsStats(env)) });
+    }
+    if (path === '/api/admin/tts/acct' && m === 'POST') { // إيقاف/تشغيل أداة (حساب) يدويًا: الموقوفة مبتاخدش فصول ومبتتحسبش في التوزيع
+      const b = await body(request, 200), pv = PROVS.includes(b.prov) ? b.prov : null; if (!pv) return fail('حساب غير معروف');
+      await setSetting(env, stKey(pv), { ...(await getSetting(env, stKey(pv))), manualOff: !!b.off });
+      return json({ ok: true, ...(await ttsStats(env)) });
+    }
+    if (path === '/api/admin/tts/library' && m === 'GET') { // الروايات اللي فيها صوت جاهز
+      const { results } = await env.DB.prepare("SELECT nid, MAX(ntitle) AS ntitle, COUNT(*) AS n, COALESCE(SUM(secs),0) AS secs FROM tts_ch WHERE status='done' GROUP BY nid ORDER BY MAX(ntitle)").all();
+      return json({ novels: results });
+    }
+    if (path === '/api/admin/tts/wipe' && m === 'POST') { // مسح تسجيلات رواية كاملة (أو فصول معيّنة) مع إخراج الفصول من الطابور (status=off) عشان متتحوّلش تاني
+      const b = await body(request, 3000), nid = b.all ? '' : str(b.nid, 80), idxs = Array.isArray(b.idx) ? b.idx.map((x) => parseInt(x, 10)).filter((x) => x >= 0).slice(0, 200) : null;
+      if (!b.all && !nid) return fail('رواية غير محددة');
+      let q = "SELECT id,nparts FROM tts_ch WHERE status='done'", args = [];
+      if (nid) { q += ' AND nid=?'; args.push(nid); }
+      if (idxs && idxs.length) q += ' AND idx IN (' + idxs.map(() => '?').join(',') + ')', args.push(...idxs);
+      const { results } = await env.DB.prepare(q + ' LIMIT 40').bind(...args).all();
+      const keys = []; for (const c of results) for (let i = 0; i < c.nparts; i++) keys.push('c/' + c.id + '/' + i + '.wav');
+      if (env.TTS_BUCKET) for (let i = 0; i < keys.length; i += 100) await env.TTS_BUCKET.delete(keys.slice(i, i + 100));
+      const now = Date.now();
+      if (results.length) await env.DB.batch(results.map((c) => env.DB.prepare("UPDATE tts_ch SET status='off',done=0,secs=0,owner='',lock_until=0,err='',updated=? WHERE id=?").bind(now, c.id)));
+      const left = (await env.DB.prepare(q.replace('SELECT id,nparts', 'SELECT COUNT(*) AS n')).bind(...args).first()).n;
+      return json({ wiped: results.length, left });
     }
     if (path === '/api/admin/tts/remove' && m === 'POST') {
       const b = await body(request, 500), nid = str(b.nid, 80);
