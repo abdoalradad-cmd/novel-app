@@ -2336,7 +2336,7 @@ async function radadPart(env, text, conf, ctx, nid) {
 }
 const xmlEsc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const speakPart = (env, prov, text, conf, ctx, nid) => radadPart(gemEnv(env, prov), text, conf, ctx, nid);
-const audioResp = (obj, hit) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'private, max-age=86400', 'X-Cache': hit ? 'HIT' : 'MISS' } });
+const audioResp = (obj, hit) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'private, no-store', 'X-Cache': hit ? 'HIT' : 'MISS' } });
 const CPS = 14; // حروف في الثانية تقريبًا (لتقدير المدة والتكلفة قبل التحويل)
 const hasMk = (t) => /[«“"]/.test(t) || /(^|\n)\s*[-–—]/.test(t);
 const hasLetters = (t) => /[؀-ۿA-Za-z0-9]/.test(t);
