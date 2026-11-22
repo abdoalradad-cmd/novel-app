@@ -278,6 +278,10 @@ public class AppNativePlugin extends Plugin {
     }
 
     private void startMedia(String title, String sub, boolean playing) {
+        startMedia(title, sub, playing, -1L, -1L, 1f);
+    }
+
+    private void startMedia(String title, String sub, boolean playing, long pos, long dur, float rate) {
         try {
             Context c = getContext();
             Intent i = new Intent(c, PlaybackService.class);
@@ -285,6 +289,9 @@ public class AppNativePlugin extends Plugin {
             i.putExtra("t", title);
             i.putExtra("s", sub);
             i.putExtra("p", playing);
+            i.putExtra("pos", pos);
+            i.putExtra("dur", dur);
+            i.putExtra("r", rate);
             ContextCompat.startForegroundService(c, i);
         } catch (Throwable e) { }
     }
@@ -312,6 +319,13 @@ public class AppNativePlugin extends Plugin {
         notifyListeners("mediaAction", o);
     }
 
+    public void fireSeek(long posMs) {
+        JSObject o = new JSObject();
+        o.put("a", "seek");
+        o.put("pos", posMs);
+        notifyListeners("mediaAction", o);
+    }
+
     private void keepWebViewAlive() {
         final Handler h = new Handler(Looper.getMainLooper());
         Runnable r = new Runnable() {
@@ -332,7 +346,10 @@ public class AppNativePlugin extends Plugin {
     public void mediaShow(final PluginCall call) {
         Boolean pl = call.getBoolean("playing", true);
         if (stopTask != null) { mainH.removeCallbacks(stopTask); stopTask = null; }
-        startMedia(call.getString("title", "RadPad"), call.getString("sub", ""), pl == null ? true : pl.booleanValue());
+        Integer ps = call.getInt("pos", -1), du = call.getInt("dur", -1);
+        Float rt = call.getFloat("rate", 1f);
+        startMedia(call.getString("title", "RadPad"), call.getString("sub", ""), pl == null ? true : pl.booleanValue(),
+                ps == null ? -1L : ps.longValue(), du == null ? -1L : du.longValue(), rt == null ? 1f : rt.floatValue());
         hookLifecycle();
         call.resolve();
     }

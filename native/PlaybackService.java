@@ -11,6 +11,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.graphics.drawable.Icon;
+import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Build;
@@ -43,6 +44,9 @@ public class PlaybackService extends Service {
     private String title = "RadPad";
     private String sub = "";
     private boolean playing = true;
+    private long pos = 0L;
+    private long dur = 0L;
+    private float rate = 1f;
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override
@@ -93,6 +97,8 @@ public class PlaybackService extends Service {
                 @Override
                 public void onSkipToPrevious() { AppNativePlugin s = sink; if (s != null) s.fireMedia("prev"); }
                 @Override
+                public void onSeekTo(long p) { AppNativePlugin s = sink; if (s != null) s.fireSeek(p); }
+                @Override
                 public void onStop() { AppNativePlugin s = sink; if (s != null) s.fireMedia("stop"); stopSelf(); }
             });
             session.setActive(true);
@@ -109,6 +115,12 @@ public class PlaybackService extends Service {
             if (t != null && t.length() > 0) title = t;
             sub = s == null ? "" : s;
             playing = intent.getBooleanExtra("p", true);
+            long np = intent.getLongExtra("pos", -1L);
+            if (np >= 0L) pos = np;
+            long nd = intent.getLongExtra("dur", -1L);
+            if (nd >= 0L) dur = nd;
+            float nr = intent.getFloatExtra("r", 1f);
+            if (nr > 0f) rate = nr;
         }
         try {
             Notification n = build();
@@ -143,11 +155,17 @@ public class PlaybackService extends Service {
         if (session == null) return;
         try {
             long actions = PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE | PlaybackState.ACTION_PLAY_PAUSE
-                    | PlaybackState.ACTION_SKIP_TO_NEXT | PlaybackState.ACTION_SKIP_TO_PREVIOUS | PlaybackState.ACTION_STOP;
+                    | PlaybackState.ACTION_SKIP_TO_NEXT | PlaybackState.ACTION_SKIP_TO_PREVIOUS | PlaybackState.ACTION_STOP | PlaybackState.ACTION_SEEK_TO;
             PlaybackState st = new PlaybackState.Builder()
                     .setActions(actions)
-                    .setState(playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED, 0L, playing ? 1f : 0f)
+                    .setState(playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED, pos, playing ? rate : 0f)
                     .build();
+            MediaMetadata md = new MediaMetadata.Builder()
+                    .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+                    .putString(MediaMetadata.METADATA_KEY_ARTIST, sub)
+                    .putLong(MediaMetadata.METADATA_KEY_DURATION, dur)
+                    .build();
+            session.setMetadata(md);
             session.setPlaybackState(st);
         } catch (Throwable e) { }
     }
