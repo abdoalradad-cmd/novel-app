@@ -34,7 +34,7 @@ jobs:
       - name: Add native code (PDF printing + text-to-speech)
         run: |
           mkdir -p android/app/src/main/java/com/alradad/novels
-          cp native/AppNativePlugin.java native/MainActivity.java android/app/src/main/java/com/alradad/novels/
+          cp native/AppNativePlugin.java native/MainActivity.java native/PlaybackService.java android/app/src/main/java/com/alradad/novels/
           sed -i 's#<application#<queries><intent><action android:name="android.intent.action.TTS_SERVICE" /></intent></queries>\n    <application#' android/app/src/main/AndroidManifest.xml
           grep -n "TTS_SERVICE" android/app/src/main/AndroidManifest.xml
           sed -i '0,/^dependencies {/s//dependencies {\n    implementation "androidx.webkit:webkit:1.12.1"/' android/app/build.gradle
@@ -47,6 +47,8 @@ jobs:
           sed -i 's#<application#<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n    <application#' android/app/src/main/AndroidManifest.xml
           sed -i 's#<application#<uses-permission android:name="android.permission.RECORD_AUDIO" />\n    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n    <uses-feature android:name="android.hardware.microphone" android:required="false" />\n    <application#' android/app/src/main/AndroidManifest.xml
           grep -n "RECORD_AUDIO" android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <application#' android/app/src/main/AndroidManifest.xml
+          sed -i 's#</application>#    <service android:name=".PlaybackService" android:exported="false" android:foregroundServiceType="mediaPlayback" />\n    </application>#' android/app/src/main/AndroidManifest.xml
           sed -i 's#</application>#    <meta-data android:name="com.google.firebase.messaging.default_notification_icon" android:resource="@drawable/ic_stat_radpad" />\n        <meta-data android:name="com.google.firebase.messaging.default_notification_color" android:resource="@android:color/holo_green_dark" />\n    </application>#' android/app/src/main/AndroidManifest.xml
           mkdir -p android/app/src/main/res/drawable
           cp native/ic_stat_radpad.xml android/app/src/main/res/drawable/

@@ -1,6 +1,9 @@
 package com.alradad.novels;
 
+import android.app.Application;
+import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -12,6 +15,9 @@ import android.speech.tts.UtteranceProgressListener;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import androidx.core.content.ContextCompat;
+
+import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
@@ -215,6 +221,74 @@ public class AppNativePlugin extends Plugin {
         try {
             String t = call.getString("topic");
             if (t != null && t.matches("[a-zA-Z0-9-_.~%]{1,900}")) com.google.firebase.messaging.FirebaseMessaging.getInstance().unsubscribeFromTopic(t);
+        } catch (Throwable e) { }
+        call.resolve();
+    }
+
+    /* ------------------------- تشغيل الصوت في الخلفية + إشعار التحكم ------------------------- */
+
+    private boolean lifecycleHooked = false;
+
+    @Override
+    public void load() {
+        PlaybackService.sink = this;
+    }
+
+    /** بتتندهي من الخدمة لما المستخدم يدوس زر في الإشعار */
+    public void fireMedia(String action) {
+        JSObject o = new JSObject();
+        o.put("a", action);
+        notifyListeners("mediaAction", o);
+    }
+
+    private void keepWebViewAlive() {
+        final Handler h = new Handler(Looper.getMainLooper());
+        Runnable r = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (!PlaybackService.active) return;
+                    WebView w = getBridge().getWebView();
+                    if (w != null) { w.onResume(); w.resumeTimers(); }
+                } catch (Throwable e) { }
+            }
+        };
+        h.postDelayed(r, 200);
+        h.postDelayed(r, 1200);
+    }
+
+    @PluginMethod
+    public void mediaShow(final PluginCall call) {
+        try {
+            Context c = getContext();
+            Intent i = new Intent(c, PlaybackService.class);
+            i.setAction(PlaybackService.A_SHOW);
+            i.putExtra("t", call.getString("title", "RadPad"));
+            i.putExtra("s", call.getString("sub", ""));
+            Boolean pl = call.getBoolean("playing", true);
+            i.putExtra("p", pl == null ? true : pl.booleanValue());
+            ContextCompat.startForegroundService(c, i);
+            if (!lifecycleHooked && getActivity() != null) {
+                lifecycleHooked = true;
+                getActivity().getApplication().registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
+                    @Override public void onActivityPaused(Activity a) { if (PlaybackService.active) keepWebViewAlive(); }
+                    @Override public void onActivityStopped(Activity a) { if (PlaybackService.active) keepWebViewAlive(); }
+                    @Override public void onActivityCreated(Activity a, Bundle b) { }
+                    @Override public void onActivityStarted(Activity a) { }
+                    @Override public void onActivityResumed(Activity a) { }
+                    @Override public void onActivitySaveInstanceState(Activity a, Bundle b) { }
+                    @Override public void onActivityDestroyed(Activity a) { }
+                });
+            }
+        } catch (Throwable e) { }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void mediaHide(final PluginCall call) {
+        try {
+            Context c = getContext();
+            c.stopService(new Intent(c, PlaybackService.class));
         } catch (Throwable e) { }
         call.resolve();
     }
