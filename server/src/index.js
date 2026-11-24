@@ -2339,6 +2339,16 @@ async function radadPart(env, text, conf, ctx, nid) {
 }
 const xmlEsc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const speakPart = (env, prov, text, conf, ctx, nid) => radadPart(gemEnv(env, prov), text, conf, ctx, nid);
+const KEEP_NAMES = ['بنت القلب', 'الترياق الفاسد', 'كن ملاكي', 'عمو الظابط', 'مليونير السنة'];
+const keepNorm = (x) => String(x || '').replace(/[\u064B-\u0652\u0640]/g, '').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').replace(/ض/g, 'ظ').replace(/\s+/g, ' ').trim();
+// الروايات المحمية من المسح: أول مرة بتتعلّم بالاسم من الروايات اللي فيها صوت، وبعد كده بتتحفظ
+async function ttsKeep(env, novels) {
+  const raw = await getSetting(env, 'ttsKeep'); let set;
+  if (raw && Array.isArray(raw.list)) set = new Set(raw.list.map(String));
+  else { if (!novels || !novels.length) novels = (await env.DB.prepare("SELECT nid, MAX(ntitle) AS ntitle FROM tts_ch GROUP BY nid").all()).results || []; set = new Set(); const names = KEEP_NAMES.map(keepNorm); for (const n of novels) { const t = keepNorm(n.ntitle); if (names.some((k) => t.includes(k))) set.add(n.nid); } await setSetting(env, 'ttsKeep', { list: [...set] }); }
+  set.missing = KEEP_NAMES.filter((k) => !(novels || []).some((n) => set.has(n.nid) && keepNorm(n.ntitle).includes(keepNorm(k))));
+  return set;
+}
 const audioResp = (obj, hit) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'private, no-store', 'X-Cache': hit ? 'HIT' : 'MISS' } });
 const CPS = 14; // حروف في الثانية تقريبًا (لتقدير المدة والتكلفة قبل التحويل)
 const hasMk = (t) => /[«“"]/.test(t) || /(^|\n)\s*[-–—]/.test(t);
@@ -3785,13 +3795,22 @@ async function route(request, env) {
     }
     if (path === '/api/admin/tts/library' && m === 'GET') { // الروايات اللي فيها صوت جاهز
       const { results } = await env.DB.prepare("SELECT nid, MAX(ntitle) AS ntitle, COUNT(*) AS n, COALESCE(SUM(secs),0) AS secs FROM tts_ch WHERE status='done' GROUP BY nid ORDER BY MAX(ntitle)").all();
-      return json({ novels: results });
+      const kp = await ttsKeep(env, results);
+      return json({ novels: results.map((r) => ({ ...r, keep: kp.has(r.nid) })), keepMissing: kp.missing });
+    }
+    if (path === '/api/admin/tts/keep' && m === 'POST') { // حماية/فكّ حماية رواية من المسح
+      const b = await body(request, 300), nid = str(b.nid, 80); if (!nid) return fail('رواية غير محددة');
+      const cur = await ttsKeep(env, []), set = new Set([...cur]); if (b.on) set.add(nid); else set.delete(nid);
+      await setSetting(env, 'ttsKeep', { list: [...set] }); return json({ ok: true, keep: [...set] });
     }
     if (path === '/api/admin/tts/wipe' && m === 'POST') { // مسح تسجيلات رواية كاملة (أو فصول معيّنة) مع إخراج الفصول من الطابور (status=off) عشان متتحوّلش تاني
       const b = await body(request, 3000), nid = b.all ? '' : str(b.nid, 80), idxs = Array.isArray(b.idx) ? b.idx.map((x) => parseInt(x, 10)).filter((x) => x >= 0).slice(0, 200) : null;
       if (!b.all && !nid) return fail('رواية غير محددة');
+      const kp = await ttsKeep(env, null);
+      if (nid && kp.has(nid)) return fail('الرواية دي محمية من المسح. فُكّ الحماية الأول لو عايز تمسحها.');
       let q = "SELECT id,nparts FROM tts_ch WHERE status='done'", args = [];
       if (nid) { q += ' AND nid=?'; args.push(nid); }
+      if (b.all && kp.size) { q += ' AND nid NOT IN (' + [...kp].map(() => '?').join(',') + ')'; args.push(...kp); }
       if (idxs && idxs.length) q += ' AND idx IN (' + idxs.map(() => '?').join(',') + ')', args.push(...idxs);
       const { results } = await env.DB.prepare(q + ' LIMIT 40').bind(...args).all();
       const keys = []; for (const c of results) for (let i = 0; i < c.nparts; i++) keys.push('c/' + c.id + '/' + i + '.wav');
@@ -3803,6 +3822,7 @@ async function route(request, env) {
     }
     if (path === '/api/admin/tts/remove' && m === 'POST') {
       const b = await body(request, 500), nid = str(b.nid, 80);
+      if ((await ttsKeep(env, null)).has(nid)) return fail('الرواية دي محمية من المسح.');
       await ttsWipeNovel(env, nid);
       await env.DB.prepare('DELETE FROM tts_ch WHERE nid=?').bind(nid).run(); return json({ ok: true, ...(await ttsStats(env)) });
     }
@@ -3811,6 +3831,7 @@ async function route(request, env) {
       const b = await body(request, 600), nid = str(b.nid, 80), prov = b.prov; if (!nid || !PROVS.includes(prov)) return fail('طلب غير صحيح');
       const conf = await getTtsConf(env), cur = await env.DB.prepare('SELECT prov FROM tts_ch WHERE nid=? LIMIT 1').bind(nid).first();
       const raw = await getSetting(env, 'tts'); await setSetting(env, 'tts', { ...raw, novelProv: { ...conf.novelProv, [nid]: prov } });
+      if (cur && (cur.prov !== prov || b.redo) && (await ttsKeep(env, null)).has(nid)) return fail('الرواية دي محمية من المسح، فمش هينفع أعيد تحويلها.');
       if (cur && (cur.prov !== prov || b.redo)) {
         await ttsWipeNovel(env, nid);
         await env.DB.prepare("UPDATE tts_ch SET prov=?,sig='',done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=? WHERE nid=? AND status!='off'").bind(prov, Date.now(), nid).run();
