@@ -1,0 +1,51 @@
+name: Compress Audio (MP3)
+
+# بيضغط أصوات الفصول الجديدة (WAV) إلى MP3 صغير كل 20 دقيقة.
+# محتاج سر واحد في Settings > Secrets and variables > Actions باسم COMPRESS_KEY
+# (بتجيبه من لوحة الأدمن: تسجيلات الروايات > مفتاح الضغط). لو مش مضاف بيتخطّى من غير أي خطأ.
+# الروايات المحميّة 🔒 مش بتتلمس.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/20 * * * *'
+
+concurrency:
+  group: compress-audio
+  cancel-in-progress: false
+
+jobs:
+  compress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      COMPRESS_KEY: ${{ secrets.COMPRESS_KEY }}
+    steps:
+      - name: Compress chapters
+        run: |
+          set -uo pipefail
+          if [ -z "${COMPRESS_KEY:-}" ]; then echo "COMPRESS_KEY مش مضاف — تخطّي."; exit 0; fi
+          command -v ffmpeg >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg; }
+          URL="${COMPRESS_KEY%%#*}"; KEY="${COMPRESS_KEY#*#}"
+          if [ "$URL" = "$COMPRESS_KEY" ] || [ -z "$KEY" ]; then echo "::error::شكل COMPRESS_KEY غلط (لازم يكون الرابط#المفتاح)"; exit 1; fi
+          AUTH="Authorization: Bearer $KEY"
+          START=$(date +%s); DONE_N=0; W=$(mktemp -d)
+          while [ $(( $(date +%s) - START )) -lt 1500 ]; do
+            R=$(curl -fsS --retry 3 -H "$AUTH" "$URL/api/cx/next") || { echo "::error::فشل الاتصال بالسيرفر أو المفتاح غلط"; exit 1; }
+            ID=$(echo "$R" | jq -r '.ch.id // empty')
+            if [ -z "$ID" ]; then echo "مفيش فصول محتاجة ضغط."; break; fi
+            NP=$(echo "$R" | jq -r '.ch.nparts')
+            echo "فصل رقم $ID ($NP أجزاء)"
+            B=0; A=0
+            for ((p=0; p<NP; p++)); do
+              curl -fsS --retry 3 -H "$AUTH" -o "$W/in.wav" "$URL/api/cx/get/$ID/$p" || { echo "::error::فشل تحميل الجزء $p"; exit 1; }
+              ffmpeg -v error -y -i "$W/in.wav" -ac 1 -ar 24000 -c:a libmp3lame -b:a 64k "$W/out.mp3" || { echo "::error::فشل الضغط للجزء $p"; exit 1; }
+              D1=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$W/in.wav"); D2=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$W/out.mp3")
+              if ! awk -v a="$D1" -v b="$D2" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(a>0 && b>0 && d<=1.0)}'; then echo "::error::مدة الجزء $p مختلفة بعد الضغط ($D1 / $D2) — اتوقف من غير ما يغيّر حاجة"; exit 1; fi
+              B=$((B + $(stat -c%s "$W/in.wav"))); A=$((A + $(stat -c%s "$W/out.mp3")))
+              curl -fsS --retry 3 -X PUT -H "$AUTH" --data-binary "@$W/out.mp3" "$URL/api/cx/put/$ID/$p" >/dev/null || { echo "::error::فشل رفع الجزء $p"; exit 1; }
+            done
+            curl -fsS --retry 2 -X POST -H "$AUTH" "$URL/api/cx/done/$ID" >/dev/null || { echo "الفصل $ID اتغيّر أثناء الضغط أو ناقص — هيتعاد لاحقاً"; continue; }
+            DONE_N=$((DONE_N+1)); echo "تم: $((B/1048576)) ميجا ← $((A/1048576)) ميجا"
+          done
+          echo "اتضغط $DONE_N فصل."

@@ -155,6 +155,7 @@ async function ensureSchema(env) {
     'CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, created_at)',
     'CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, created_at)',
     'CREATE TABLE IF NOT EXISTS tts_usage (day TEXT PRIMARY KEY, reqs INTEGER NOT NULL DEFAULT 0, hits INTEGER NOT NULL DEFAULT 0, chars INTEGER NOT NULL DEFAULT 0, secs REAL NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, fails INTEGER NOT NULL DEFAULT 0, limited INTEGER NOT NULL DEFAULT 0)']) await env.DB.prepare(q).run();
+  try { await env.DB.prepare('SELECT fmt FROM tts_ch LIMIT 1').first(); } catch (e) { try { await env.DB.prepare("ALTER TABLE tts_ch ADD COLUMN fmt TEXT NOT NULL DEFAULT 'wav'").run(); } catch (e2) {} }
   try { await env.DB.prepare('SELECT prov FROM tts_ch LIMIT 1').first(); } catch (e) { await env.DB.prepare("ALTER TABLE tts_ch ADD COLUMN prov TEXT NOT NULL DEFAULT 'gemini'").run(); }
   for (const [c, d] of [['author_uid', 'INTEGER NOT NULL DEFAULT 0'], ['status', "TEXT NOT NULL DEFAULT 'ok'"]]) {
     try { await env.DB.prepare('SELECT ' + c + ' FROM news LIMIT 1').first(); } catch (e) { try { await env.DB.prepare('ALTER TABLE news ADD COLUMN ' + c + ' ' + d).run(); } catch (e2) {} }
@@ -2409,7 +2410,7 @@ async function ttsMigrate(env) {
 }
 async function ttsWipeNovel(env, nid) { // مسح الصوت المتخزّن لرواية
   const { results } = await env.DB.prepare('SELECT id,nparts FROM tts_ch WHERE nid=?').bind(nid).all();
-  if (env.TTS_BUCKET) for (const c of results) { const keys = []; for (let i = 0; i < c.nparts; i++) keys.push('c/' + c.id + '/' + i + '.wav'); for (let i = 0; i < keys.length; i += 100) await env.TTS_BUCKET.delete(keys.slice(i, i + 100)); }
+  if (env.TTS_BUCKET) for (const c of results) { const keys = []; for (let i = 0; i < c.nparts; i++) keys.push('c/' + c.id + '/' + i + '.wav', 'c/' + c.id + '/' + i + '.mp3'); for (let i = 0; i < keys.length; i += 100) await env.TTS_BUCKET.delete(keys.slice(i, i + 100)); }
 }
 // خطوة تحويل واحدة لمزوّد واحد: بتاخد أول فصل في طابوره (بالترتيب) وتولّد منه كام جزء، بشرط الحد اليومي. بتتنادى كل دقيقة من Cron.
 /* توزيع تلقائي: أي حساب طابوره فضي (وجاهز) بياخد رواية أو اتنين لسه ما اتبدأتش من طوابير الحسابات التانية */
@@ -2471,6 +2472,7 @@ async function ttsStep0(env, opts = {}) {
   if (r && r.meta && typeof r.meta.changes === 'number' && !r.meta.changes) return { ok: true, idle: 'empty', prov };
   const ch = await env.DB.prepare("SELECT * FROM tts_ch WHERE owner=? AND status='running'").bind(tok).first();
   if (!ch) return { ok: true, idle: 'empty', prov };
+  if (ch.fmt === 'mp3') { try { await env.DB.prepare("UPDATE tts_ch SET fmt='wav' WHERE id=?").bind(ch.id).run(); const mk = []; for (let i = 0; i < ch.nparts; i++) mk.push('c/' + ch.id + '/' + i + '.mp3'); for (let i = 0; i < mk.length; i += 100) await env.TTS_BUCKET.delete(mk.slice(i, i + 100)); } catch (e) {} }
   let parts = JSON.parse(ch.parts || '[]');
   if (ch.done === 0 && parts.length && Math.max(...parts.map((x) => x[1] - x[0])) > rdPartMx(conf) * 1.25) { const np = splitParts(ch.text, rdPartMx(conf)); if (np.length) { parts = np; await env.DB.prepare('UPDATE tts_ch SET parts=?,nparts=? WHERE id=?').bind(JSON.stringify(np), np.length, ch.id).run(); } }
   let done = ch.done, secsTot = ch.secs, made = 0, err = '', hardFail = false, deadKey = false, limMsg = '';
@@ -3062,11 +3064,12 @@ async function route(request, env) {
   if ((g = /^\/api\/tts\/part\/(\d+)\/(\d+)$/.exec(path)) && m === 'GET' && url.searchParams.get('k')) {
     const tk = await readToken(env, str(url.searchParams.get('k'), 400));
     if (!tk || !tk.tp || !env.TTS_BUCKET) return fail('الرابط منتهي', 403);
-    const rg = request.headers.get('range'), key = 'c/' + g[1] + '/' + g[2] + '.wav';
-    const o = await env.TTS_BUCKET.get(key, rg ? { range: request.headers } : undefined);
+    const rg = request.headers.get('range'); let ext = url.searchParams.get('f') === 'mp3' ? 'mp3' : 'wav';
+    let o = await env.TTS_BUCKET.get('c/' + g[1] + '/' + g[2] + '.' + ext, rg ? { range: request.headers } : undefined);
+    if (!o) { ext = ext === 'mp3' ? 'wav' : 'mp3'; o = await env.TTS_BUCKET.get('c/' + g[1] + '/' + g[2] + '.' + ext, rg ? { range: request.headers } : undefined); } // المانيفست ممكن يكون قديم بعد الضغط
     if (!o) return fail('الجزء مش موجود', 404);
     const size = o.size, off = rg && o.range && o.range.offset !== undefined ? o.range.offset : 0, len = rg && o.range && o.range.length !== undefined ? o.range.length : size - off;
-    const h = { ...CORS, 'Content-Type': 'audio/wav', 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, no-store', 'Content-Length': String(len) };
+    const h = { ...CORS, 'Content-Type': ext === 'mp3' ? 'audio/mpeg' : 'audio/wav', 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, no-store', 'Content-Length': String(len) };
     if (rg) { h['Content-Range'] = 'bytes ' + off + '-' + (off + len - 1) + '/' + size; return new Response(o.body, { status: 206, headers: h }); }
     return new Response(o.body, { status: 200, headers: h });
   }
@@ -3075,14 +3078,20 @@ async function route(request, env) {
   if (path === '/api/tts/dl' && m === 'GET') {
     const tk = await readToken(env, str(url.searchParams.get('k'), 400));
     if (!tk || !tk.dl || !env.TTS_BUCKET) return fail('الرابط منتهي، اطلبه من التطبيق تاني', 403);
-    const c = await env.DB.prepare("SELECT id,nparts,ntitle,ctitle,status FROM tts_ch WHERE nid=? AND idx=?").bind(tk.dl, tk.ix).first();
+    const c = await env.DB.prepare("SELECT id,nparts,ntitle,ctitle,status,fmt FROM tts_ch WHERE nid=? AND idx=?").bind(tk.dl, tk.ix).first();
     let pubId = c && c.id, pubN = c && c.nparts;
     if (tk.g) { const sg2 = await env.DB.prepare('SELECT ch_id,nparts FROM tts_gen_stage WHERE nid=? AND idx=? AND ch_id=?').bind(tk.dl, tk.ix, +tk.g).first(); if (!sg2) return fail('الصوت لسه مش جاهز', 404); pubId = sg2.ch_id; pubN = sg2.nparts; }
     else if (!c || c.status !== 'done') return fail('الصوت لسه مش جاهز', 404);
     if (!c) return fail('الفصل مش موجود', 404);
-    const keys = []; for (let i = 0; i < pubN; i++) keys.push('c/' + pubId + '/' + i + '.wav');
+    const mp = !tk.g && c.fmt === 'mp3', keys = []; for (let i = 0; i < pubN; i++) keys.push('c/' + pubId + '/' + i + (mp ? '.mp3' : '.wav'));
     const heads = await Promise.all(keys.map((k) => env.TTS_BUCKET.head(k)));
     if (heads.some((h) => !h)) return fail('جزء من الصوت ناقص', 404);
+    if (mp) { // MP3: الأجزاء بتتلزق ورا بعض زي ما هي
+      let i2 = 0, rd2 = null; const bk = env.TTS_BUCKET, tot2 = heads.reduce((a, h) => a + h.size, 0);
+      const st2 = new ReadableStream({ async pull(ctl) { for (;;) { if (!rd2) { if (i2 >= keys.length) { ctl.close(); return; } const o = await bk.get(keys[i2++]); if (!o) { ctl.error(new Error('part')); return; } rd2 = o.body.getReader(); } const { done, value } = await rd2.read(); if (done) { rd2 = null; continue; } if (value.length) { ctl.enqueue(value); return; } } } });
+      const nm2 = String((c.ntitle || 'novel') + ' - ' + (c.ctitle || ('chapter ' + tk.ix))).replace(/[\\/:*?"<>|\r\n]+/g, ' ').trim().slice(0, 120) + '.mp3';
+      return new Response(st2, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/mpeg', 'Content-Length': String(tot2), 'Content-Disposition': "attachment; filename=\"audio.mp3\"; filename*=UTF-8''" + encodeURIComponent(nm2), 'Cache-Control': 'private, no-store' } });
+    }
     const total = heads.reduce((a, h) => a + Math.max(0, h.size - 44), 0);
     const hd = pcmToWav(new Uint8Array(0), 24000), hv = new DataView(hd.buffer); hv.setUint32(4, 36 + total, true); hv.setUint32(40, total, true);
     let i = 0, rd = null, skip = 44; const bucket = env.TTS_BUCKET;
@@ -3100,6 +3109,39 @@ async function route(request, env) {
     });
     const nm = String((c.ntitle || 'novel') + ' - ' + (c.ctitle || ('chapter ' + tk.ix))).replace(/[\\/:*?"<>|\r\n]+/g, ' ').trim().slice(0, 120) + '.wav';
     return new Response(stream, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Content-Length': String(44 + total), 'Content-Disposition': "attachment; filename=\"audio.wav\"; filename*=UTF-8''" + encodeURIComponent(nm), 'Cache-Control': 'private, no-store' } });
+  }
+
+  /* ----- ضغط الصوت (GitHub Actions): بمفتاح خاص بيحوّل أجزاء WAV الجاهزة لـ MP3 صغير ----- */
+  if ((g = /^\/api\/cx\/(next|get|put|done)(?:\/(\d+)(?:\/(\d+))?)?$/.exec(path)) && env.TTS_BUCKET) {
+    const ctk = await readToken(env, str((request.headers.get('authorization') || '').replace(/^Bearer\s+/i, ''), 600));
+    if (!ctk || !ctk.cx) return fail('مفتاح الضغط غير صحيح', 403);
+    if (g[1] === 'next' && m === 'GET') {
+      const kp = await ttsKeep(env, null), args = [Date.now() - 180000];
+      let q = "SELECT id,nid,idx,nparts,updated FROM tts_ch WHERE status='done' AND fmt='wav' AND nparts>0 AND updated<? AND id NOT IN (SELECT ch_id FROM tts_gen_stage WHERE status IN ('staged','publishing'))";
+      if (kp.size) { q += ' AND nid NOT IN (' + [...kp].map(() => '?').join(',') + ')'; args.push(...kp); }
+      const c = await env.DB.prepare(q + ' ORDER BY updated ASC LIMIT 1').bind(...args).first();
+      return json({ ch: c || null }, 200, { 'Cache-Control': 'no-store' });
+    }
+    const cid = +g[2], c = cid ? await env.DB.prepare('SELECT id,nid,nparts,status,fmt,updated FROM tts_ch WHERE id=?').bind(cid).first() : null;
+    if (!c || c.status !== 'done' || c.fmt !== 'wav') return fail('الفصل اتغيّر', 409);
+    if ((await ttsKeep(env, null)).has(c.nid)) return fail('رواية محميّة', 403);
+    if (g[1] === 'get' && m === 'GET') { const o = await env.TTS_BUCKET.get('c/' + c.id + '/' + (+g[3]) + '.wav'); return o ? new Response(o.body, { headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store' } }) : fail('الجزء مش موجود', 404); }
+    if (g[1] === 'put' && m === 'PUT') {
+      const pi = +g[3]; if (!(pi >= 0 && pi < c.nparts)) return fail('جزء غلط');
+      const buf = await request.arrayBuffer(); if (buf.byteLength < 800 || buf.byteLength > 30000000) return fail('حجم الملف غير منطقي');
+      await env.TTS_BUCKET.put('c/' + c.id + '/' + pi + '.mp3', buf, { httpMetadata: { contentType: 'audio/mpeg' } }); return json({ ok: true, size: buf.byteLength });
+    }
+    if (g[1] === 'done' && m === 'POST') {
+      const have = new Set(); let cur = undefined;
+      for (let k = 0; k < 5; k++) { const ls = await env.TTS_BUCKET.list({ prefix: 'c/' + c.id + '/', cursor: cur }); ls.objects.forEach((x) => have.add(x.key)); if (!ls.truncated) break; cur = ls.cursor; }
+      for (let i = 0; i < c.nparts; i++) if (!have.has('c/' + c.id + '/' + i + '.mp3') || !have.has('c/' + c.id + '/' + i + '.wav')) return fail('جزء ناقص رقم ' + i, 409);
+      const r = await env.DB.prepare("UPDATE tts_ch SET fmt='mp3' WHERE id=? AND status='done' AND fmt='wav' AND updated=?").bind(c.id, c.updated).run();
+      const mk = [], wk = []; for (let i = 0; i < c.nparts; i++) { mk.push('c/' + c.id + '/' + i + '.mp3'); wk.push('c/' + c.id + '/' + i + '.wav'); }
+      if (!(r && r.meta && r.meta.changes)) { for (let i = 0; i < mk.length; i += 100) await env.TTS_BUCKET.delete(mk.slice(i, i + 100)); return fail('الفصل اتغيّر أثناء الضغط', 409); }
+      for (let i = 0; i < wk.length; i += 100) await env.TTS_BUCKET.delete(wk.slice(i, i + 100));
+      return json({ ok: true });
+    }
+    return fail('طلب غير صحيح', 400);
   }
 
   /* ----- كل ما بعد كده يحتاج تسجيل دخول ----- */
@@ -3301,9 +3343,9 @@ async function route(request, env) {
     if ((await getTtsConf(env)).hideListen) return fail('الاستماع متوقف مؤقتًا', 403);
     if (!isPremium(user) && !(await getTtsConf(env)).listenAll) return fail('الاستماع لمشتركي Premium', 403);
     const nid = str(url.searchParams.get('nid'), 80), ix = parseInt(url.searchParams.get('idx'), 10);
-    const c = await env.DB.prepare('SELECT id,status,parts,done,nparts,secs,LENGTH(text) AS total FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
+    const c = await env.DB.prepare('SELECT id,status,parts,done,nparts,secs,fmt,LENGTH(text) AS total FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first();
     if (!c) return json({ status: 'none' }, 200, { 'Cache-Control': 'no-store' });
-    if (c.status === 'done') return json({ status: 'ready', id: c.id, parts: JSON.parse(c.parts), total: c.total, secs: c.secs }, 200, { 'Cache-Control': 'private, max-age=300' });
+    if (c.status === 'done') return json({ status: 'ready', id: c.id, parts: JSON.parse(c.parts), total: c.total, secs: c.secs, fmt: c.fmt === 'mp3' ? 'mp3' : 'wav' }, 200, { 'Cache-Control': 'private, max-age=300' });
     return json({ status: 'pending', done: c.done, n: c.nparts }, 200, { 'Cache-Control': 'no-store' });
   }
   if (path === '/api/tts/ptoken' && m === 'GET') { // تصريح قصير لتشغيل الأجزاء بالبث (نفس شرط الاستماع)
@@ -3315,7 +3357,8 @@ async function route(request, env) {
   if ((g = /^\/api\/tts\/part\/(\d+)\/(\d+)$/.exec(path)) && m === 'GET') {
     if (!isPremium(user) && !(await getTtsConf(env)).listenAll) return fail('الاستماع لمشتركي Premium', 403);
     if (!env.TTS_BUCKET) return fail('التخزين مش متفعّل', 503);
-    const o = await env.TTS_BUCKET.get('c/' + g[1] + '/' + g[2] + '.wav'); if (!o) return fail('الجزء مش موجود', 404);
+    const o = await env.TTS_BUCKET.get('c/' + g[1] + '/' + g[2] + '.wav');
+    if (!o) { const o2 = await env.TTS_BUCKET.get('c/' + g[1] + '/' + g[2] + '.mp3'); if (o2) return new Response(o2.body, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/mpeg', 'Cache-Control': 'private, no-store' } }); return fail('الجزء مش موجود', 404); }
     return audioResp(o, true);
   }
 
@@ -3591,7 +3634,7 @@ async function route(request, env) {
       const { results } = await env.DB.prepare("SELECT id,nid,idx,ntitle,ctitle,secs,nparts,LENGTH(text) AS len FROM tts_ch WHERE status='done' AND (secs<? OR secs < LENGTH(text)*1.0/" + CPS + "*?)").bind(max, ratio).all();
       if (!b.dry) {
         for (const r of results) {
-          if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < r.nparts; i++) ks.push('c/' + r.id + '/' + i + '.wav'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); }
+          if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < r.nparts; i++) ks.push('c/' + r.id + '/' + i + '.wav', 'c/' + r.id + '/' + i + '.mp3'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); }
           await env.DB.prepare('DELETE FROM tts_ch WHERE id=?').bind(r.id).run();
         }
       }
@@ -3620,7 +3663,7 @@ async function route(request, env) {
         else if (ex.status === 'off' && !it.redo) { skipped++; } // فصل متشال يدوي من الطابور: السينك ما يرجّعوش لوحده
         else if (!it.redo && (ex.status === 'done' || (ex.sig === sig && !(hasMk(text) && !hasMk(ex.text))))) { await env.DB.prepare('UPDATE tts_ch SET ntitle=?,ctitle=? WHERE id=?').bind(ntitle, ctitle, ex.id).run(); skipped++; }
         else {
-          if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < ex.nparts; i++) ks.push('c/' + ex.id + '/' + i + '.wav'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); } await env.DB.prepare("UPDATE tts_ch SET ntitle=?,ctitle=?,sig=?,text=?,parts=?,nparts=?,done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=?,prov=? WHERE id=?").bind(ntitle, ctitle, sig, text, JSON.stringify(parts), parts.length, now, prov, ex.id).run(); updated++; }
+          if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < ex.nparts; i++) ks.push('c/' + ex.id + '/' + i + '.wav', 'c/' + ex.id + '/' + i + '.mp3'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); } await env.DB.prepare("UPDATE tts_ch SET ntitle=?,ctitle=?,sig=?,text=?,parts=?,nparts=?,done=0,secs=0,status='queued',owner='',lock_until=0,retry_at=0,attempts=0,err='',updated=?,prov=? WHERE id=?").bind(ntitle, ctitle, sig, text, JSON.stringify(parts), parts.length, now, prov, ex.id).run(); updated++; }
       }
       return json({ ok: true, added, updated, skipped });
     }
@@ -3741,9 +3784,9 @@ async function route(request, env) {
     if (path === '/api/admin/tts/ch' && m === 'POST') {
       const b = await body(request, 600), nid = str(b.nid, 80), ix = parseInt(b.idx, 10), op = String(b.op || '');
       const c = await env.DB.prepare('SELECT id,nparts,status FROM tts_ch WHERE nid=? AND idx=?').bind(nid, ix).first(); if (!c) return fail('الفصل مش في الطابور', 404);
-      const wipe = async () => { if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < c.nparts; i++) ks.push('c/' + c.id + '/' + i + '.wav'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); } };
+      const wipe = async () => { if (env.TTS_BUCKET) { const ks = []; for (let i = 0; i < c.nparts; i++) ks.push('c/' + c.id + '/' + i + '.wav', 'c/' + c.id + '/' + i + '.mp3'); for (let i = 0; i < ks.length; i += 100) await env.TTS_BUCKET.delete(ks.slice(i, i + 100)); } };
       const now = Date.now();
-      if (op === 'off') { await wipe(); await env.DB.prepare("UPDATE tts_ch SET status='off',done=0,secs=0,owner='',lock_until=0,err='',updated=? WHERE id=?").bind(now, c.id).run(); }
+      if (op === 'off') { await wipe(); await env.DB.prepare("UPDATE tts_ch SET status='off',done=0,secs=0,fmt='wav',owner='',lock_until=0,err='',updated=? WHERE id=?").bind(now, c.id).run(); }
       else if (op === 'on') await env.DB.prepare("UPDATE tts_ch SET status=CASE WHEN done>=nparts AND nparts>0 THEN 'done' ELSE 'queued' END,attempts=0,retry_at=0,err='',owner='',lock_until=0,updated=? WHERE id=?").bind(now, c.id).run();
       else if (op === 'redo') { await wipe(); await env.DB.prepare("UPDATE tts_ch SET status='queued',done=0,secs=0,sig='',attempts=0,retry_at=0,err='',owner='',lock_until=0,updated=? WHERE id=?").bind(now, c.id).run(); }
       else if (op === 'front') { const mn = await env.DB.prepare('SELECT COALESCE(MIN(ord),0) AS m FROM tts_ch').first(); await env.DB.prepare('UPDATE tts_ch SET ord=? WHERE id=?').bind(mn.m - 1, c.id).run(); }
@@ -3794,9 +3837,14 @@ async function route(request, env) {
       return json({ ok: true, ...(await ttsStats(env)) });
     }
     if (path === '/api/admin/tts/library' && m === 'GET') { // الروايات اللي فيها صوت جاهز
-      const { results } = await env.DB.prepare("SELECT nid, MAX(ntitle) AS ntitle, COUNT(*) AS n, COALESCE(SUM(secs),0) AS secs FROM tts_ch WHERE status='done' GROUP BY nid ORDER BY MAX(ntitle)").all();
+      const { results } = await env.DB.prepare("SELECT nid, MAX(ntitle) AS ntitle, COUNT(*) AS n, COALESCE(SUM(secs),0) AS secs, SUM(CASE WHEN fmt='mp3' THEN 1 ELSE 0 END) AS mp3 FROM tts_ch WHERE status='done' GROUP BY nid ORDER BY MAX(ntitle)").all();
       const kp = await ttsKeep(env, results);
       return json({ novels: results.map((r) => ({ ...r, keep: kp.has(r.nid) })), keepMissing: kp.missing });
+    }
+    if (path === '/api/admin/tts/cxkey' && m === 'POST') { // مفتاح الضغط (للـGitHub Actions): الرابط#المفتاح — صالح سنة
+      const bd = b64u(enc.encode(JSON.stringify({ cx: 1, exp: Date.now() + 365 * 86400000 })));
+      const sg = await crypto.subtle.sign('HMAC', await getKey(env), enc.encode(bd));
+      return json({ key: new URL(request.url).origin + '#' + bd + '.' + b64u(sg) });
     }
     if (path === '/api/admin/tts/keep' && m === 'POST') { // حماية/فكّ حماية رواية من المسح
       const b = await body(request, 300), nid = str(b.nid, 80); if (!nid) return fail('رواية غير محددة');
@@ -3813,10 +3861,10 @@ async function route(request, env) {
       if (b.all && kp.size) { q += ' AND nid NOT IN (' + [...kp].map(() => '?').join(',') + ')'; args.push(...kp); }
       if (idxs && idxs.length) q += ' AND idx IN (' + idxs.map(() => '?').join(',') + ')', args.push(...idxs);
       const { results } = await env.DB.prepare(q + ' LIMIT 40').bind(...args).all();
-      const keys = []; for (const c of results) for (let i = 0; i < c.nparts; i++) keys.push('c/' + c.id + '/' + i + '.wav');
+      const keys = []; for (const c of results) for (let i = 0; i < c.nparts; i++) keys.push('c/' + c.id + '/' + i + '.wav', 'c/' + c.id + '/' + i + '.mp3');
       if (env.TTS_BUCKET) for (let i = 0; i < keys.length; i += 100) await env.TTS_BUCKET.delete(keys.slice(i, i + 100));
       const now = Date.now();
-      if (results.length) await env.DB.batch(results.map((c) => env.DB.prepare("UPDATE tts_ch SET status='off',done=0,secs=0,owner='',lock_until=0,err='',updated=? WHERE id=?").bind(now, c.id)));
+      if (results.length) await env.DB.batch(results.map((c) => env.DB.prepare("UPDATE tts_ch SET status='off',done=0,secs=0,fmt='wav',owner='',lock_until=0,err='',updated=? WHERE id=?").bind(now, c.id)));
       const left = (await env.DB.prepare(q.replace('SELECT id,nparts', 'SELECT COUNT(*) AS n')).bind(...args).first()).n;
       return json({ wiped: results.length, left });
     }
