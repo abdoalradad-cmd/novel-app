@@ -3048,6 +3048,19 @@ async function route(request, env) {
     return json({ ok: true });
   }
 
+  /* ----- بث الصوت بالـRange برابط مؤقت (من غير تحميل الجزء كله قبل التشغيل) ----- */
+  if ((g = /^\/api\/tts\/part\/(\d+)\/(\d+)$/.exec(path)) && m === 'GET' && url.searchParams.get('k')) {
+    const tk = await readToken(env, str(url.searchParams.get('k'), 400));
+    if (!tk || !tk.tp || !env.TTS_BUCKET) return fail('الرابط منتهي', 403);
+    const rg = request.headers.get('range'), key = 'c/' + g[1] + '/' + g[2] + '.wav';
+    const o = await env.TTS_BUCKET.get(key, rg ? { range: request.headers } : undefined);
+    if (!o) return fail('الجزء مش موجود', 404);
+    const size = o.size, off = rg && o.range && o.range.offset !== undefined ? o.range.offset : 0, len = rg && o.range && o.range.length !== undefined ? o.range.length : size - off;
+    const h = { ...CORS, 'Content-Type': 'audio/wav', 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, no-store', 'Content-Length': String(len) };
+    if (rg) { h['Content-Range'] = 'bytes ' + off + '-' + (off + len - 1) + '/' + size; return new Response(o.body, { status: 206, headers: h }); }
+    return new Response(o.body, { status: 200, headers: h });
+  }
+
   /* ----- تنزيل صوت فصل كامل (WAV واحد) برابط مؤقت للأدمن بس: بيتفتح في متصفح الموبايل فينزل مباشرة ----- */
   if (path === '/api/tts/dl' && m === 'GET') {
     const tk = await readToken(env, str(url.searchParams.get('k'), 400));
@@ -3282,6 +3295,12 @@ async function route(request, env) {
     if (!c) return json({ status: 'none' }, 200, { 'Cache-Control': 'no-store' });
     if (c.status === 'done') return json({ status: 'ready', id: c.id, parts: JSON.parse(c.parts), total: c.total, secs: c.secs }, 200, { 'Cache-Control': 'private, max-age=300' });
     return json({ status: 'pending', done: c.done, n: c.nparts }, 200, { 'Cache-Control': 'no-store' });
+  }
+  if (path === '/api/tts/ptoken' && m === 'GET') { // تصريح قصير لتشغيل الأجزاء بالبث (نفس شرط الاستماع)
+    if (!isPremium(user) && !(await getTtsConf(env)).listenAll) return fail('الاستماع لمشتركي Premium', 403);
+    const bd = b64u(enc.encode(JSON.stringify({ tp: 1, uid: user.id, exp: Date.now() + 3 * 3600000 })));
+    const sg = await crypto.subtle.sign('HMAC', await getKey(env), enc.encode(bd));
+    return json({ k: bd + '.' + b64u(sg), ttl: 3 * 3600 }, 200, { 'Cache-Control': 'private, no-store' });
   }
   if ((g = /^\/api\/tts\/part\/(\d+)\/(\d+)$/.exec(path)) && m === 'GET') {
     if (!isPremium(user) && !(await getTtsConf(env)).listenAll) return fail('الاستماع لمشتركي Premium', 403);

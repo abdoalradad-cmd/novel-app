@@ -243,7 +243,8 @@ public class AppNativePlugin extends Plugin {
             @Override
             public void run() {
                 hookLifecycle();
-                watchAudio();
+                // أي إشعار/خدمة متبقية من تشغيل سابق بتتمسح أول ما التطبيق يفتح (الصفحة هي اللي بتشغّلها لما يبدأ صوت فعلًا)
+                try { Context c0 = getContext(); c0.stopService(new Intent(c0, PlaybackService.class)); } catch (Throwable e) { }
             }
         });
     }
