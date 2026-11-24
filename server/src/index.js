@@ -156,6 +156,7 @@ async function ensureSchema(env) {
     'CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, created_at)',
     'CREATE TABLE IF NOT EXISTS tts_usage (day TEXT PRIMARY KEY, reqs INTEGER NOT NULL DEFAULT 0, hits INTEGER NOT NULL DEFAULT 0, chars INTEGER NOT NULL DEFAULT 0, secs REAL NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, fails INTEGER NOT NULL DEFAULT 0, limited INTEGER NOT NULL DEFAULT 0)']) await env.DB.prepare(q).run();
   try { await env.DB.prepare('SELECT fmt FROM tts_ch LIMIT 1').first(); } catch (e) { try { await env.DB.prepare("ALTER TABLE tts_ch ADD COLUMN fmt TEXT NOT NULL DEFAULT 'wav'").run(); } catch (e2) {} }
+  for (const [c, d] of [['fmt', "TEXT NOT NULL DEFAULT 'wav'"], ['mp3_meta', "TEXT NOT NULL DEFAULT ''"]]) { try { await env.DB.prepare('SELECT ' + c + ' FROM tts_gen_stage LIMIT 1').first(); } catch (e) { try { await env.DB.prepare('ALTER TABLE tts_gen_stage ADD COLUMN ' + c + ' ' + d).run(); } catch (e2) {} } } // جيل مجهّز بصيغة MP3: fmt + mp3_meta (kbps + مدد الأجزاء)
   try { await env.DB.prepare('SELECT prov FROM tts_ch LIMIT 1').first(); } catch (e) { await env.DB.prepare("ALTER TABLE tts_ch ADD COLUMN prov TEXT NOT NULL DEFAULT 'gemini'").run(); }
   for (const [c, d] of [['author_uid', 'INTEGER NOT NULL DEFAULT 0'], ['status', "TEXT NOT NULL DEFAULT 'ok'"]]) {
     try { await env.DB.prepare('SELECT ' + c + ' FROM news LIMIT 1').first(); } catch (e) { try { await env.DB.prepare('ALTER TABLE news ADD COLUMN ' + c + ' ' + d).run(); } catch (e2) {} }
@@ -2350,6 +2351,53 @@ async function ttsKeep(env, novels) {
   set.missing = KEEP_NAMES.filter((k) => !(novels || []).some((n) => set.has(n.nid) && keepNorm(n.ntitle).includes(keepNorm(k))));
   return set;
 }
+const hex256 = async (buf) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', buf))].map((x) => x.toString(16).padStart(2, '0')).join('');
+const MP3_KBPS = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+// فحص ملف MP3 صارم: ID3v2 اختياري في الأول، بعدها إطارات MPEG-2 Layer III بـ24kHz mono بنفس الـbitrate (CBR) متتالية بلا فجوات لحد آخر الملف بالظبط (ولا ID3v1 ولا بايتات زيادة)
+function parseMp3(u8) {
+  const n = u8.length; let pos = 0;
+  if (n >= 10 && u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) { if ((u8[6] | u8[7] | u8[8] | u8[9]) & 0x80) return { err: 'ID3 غلط' }; pos = 10 + ((u8[6] << 21) | (u8[7] << 14) | (u8[8] << 7) | u8[9]) + ((u8[5] & 0x10) ? 10 : 0); }
+  let kbps = 0, frames = 0, xing = false;
+  while (pos < n) {
+    if (pos + 4 > n) return { err: 'ذيل غير مكتمل' };
+    const b0 = u8[pos], b1 = u8[pos + 1], b2 = u8[pos + 2], b3 = u8[pos + 3];
+    if (b0 !== 0xff || (b1 & 0xfe) !== 0xf2) return { err: 'ترويسة إطار غير MPEG-2 Layer III عند ' + pos };
+    const bi = b2 >> 4, si = (b2 >> 2) & 3, pad = (b2 >> 1) & 1, mono = (b3 >> 6) === 3;
+    if (bi < 1 || bi > 14 || si !== 1 || !mono) return { err: 'إطار غير 24kHz mono عند ' + pos };
+    if (!kbps) kbps = MP3_KBPS[bi]; else if (MP3_KBPS[bi] !== kbps) return { err: 'bitrate غير ثابت عند ' + pos };
+    const len = 3 * kbps + pad; if (pos + len > n) return { err: 'إطار مقطوع عند ' + pos };
+    if (frames === 0 && pos + 17 <= n) { const t = String.fromCharCode(u8[pos + 13], u8[pos + 14], u8[pos + 15], u8[pos + 16]); if (t === 'Xing' || t === 'Info') xing = true; }
+    frames++; pos += len;
+  }
+  const audio = frames - (xing ? 1 : 0);
+  if (!(audio > 0)) return { err: 'مفيش إطارات صوت' };
+  return { kbps, frames, audio, secs: audio * 576 / 24000 };
+}
+// تحقق جيل مجهّز MP3 قبل النشر: كل جزء (وجود + حجم + sha في metadata + اتساق الحجم مع المدة المعلنة CBR) + عيّنة أول/وسط/آخر (sha من البايتات + إطارات + مدة) + مجموع المدد مقابل مدة الجيل
+async function mp3VerifyStage(env, st) {
+  const shas = new Array(st.nparts); let meta; try { meta = JSON.parse(st.mp3_meta || ''); } catch (e) { meta = null; }
+  if (!meta || !Number.isInteger(meta.kbps) || meta.kbps < 32 || meta.kbps > 128 || !Array.isArray(meta.durs) || meta.durs.length !== st.nparts || meta.durs.some((d) => !(+d > 0) || !isFinite(+d))) return { shas, err: 'بيانات MP3 للجيل ناقصة أو غير صالحة', bad: -3 };
+  const durs = meta.durs.map(Number), sum = durs.reduce((a, z) => a + z, 0);
+  if (Math.abs(sum - st.secs) > st.nparts * 0.5 + 1) return { shas, err: 'مدة الجيل المعلنة لا تطابق مدد أجزاء MP3', bad: -2 };
+  let bad = -1; const sizes = new Array(st.nparts).fill(0);
+  for (let i0 = 0; i0 < st.nparts && bad < 0; i0 += 10) {
+    await Promise.all(Array.from({ length: Math.min(10, st.nparts - i0) }, async (_, k) => {
+      const i = i0 + k, h = await env.TTS_BUCKET.head('c/' + st.ch_id + '/' + i + '.mp3');
+      const m = h && h.customMetadata && /^[0-9a-f]{64}$/.test(h.customMetadata.sha256 || '') ? h.customMetadata.sha256 : '';
+      if (!h || !h.size || !m || Math.abs(h.size * 8 / (meta.kbps * 1000) - durs[i]) > 0.25) { if (bad < 0) bad = i; return; }
+      shas[i] = m; sizes[i] = h.size;
+    }));
+  }
+  if (bad >= 0) return { shas, err: 'جزء MP3 ناقص أو حجمه لا يطابق مدته: ' + bad, bad };
+  for (const i of new Set([0, Math.floor((st.nparts - 1) / 2), st.nparts - 1])) {
+    const o = await env.TTS_BUCKET.get('c/' + st.ch_id + '/' + i + '.mp3'); if (!o) return { shas, err: 'جزء MP3 ناقص: ' + i, bad: i };
+    const buf = await o.arrayBuffer(); if (buf.byteLength !== sizes[i]) return { shas, err: 'حجم جزء MP3 تغيّر: ' + i, bad: i };
+    const p = parseMp3(new Uint8Array(buf));
+    if (p.err || p.kbps !== meta.kbps || Math.abs(p.secs - durs[i]) > 0.1) return { shas, err: 'جزء MP3 ' + i + ' غير صالح: ' + (p.err || 'bitrate/مدة لا تطابق'), bad: i };
+    if ((await hex256(buf)) !== shas[i]) return { shas, err: 'بصمة جزء MP3 لا تطابق بايتاته: ' + i, bad: i };
+  }
+  return { shas, err: '', bad: -1 };
+}
 const audioResp = (obj, hit) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'private, no-store', 'X-Cache': hit ? 'HIT' : 'MISS' } });
 const CPS = 14; // حروف في الثانية تقريبًا (لتقدير المدة والتكلفة قبل التحويل)
 const hasMk = (t) => /[«“"]/.test(t) || /(^|\n)\s*[-–—]/.test(t);
@@ -3079,11 +3127,11 @@ async function route(request, env) {
     const tk = await readToken(env, str(url.searchParams.get('k'), 400));
     if (!tk || !tk.dl || !env.TTS_BUCKET) return fail('الرابط منتهي، اطلبه من التطبيق تاني', 403);
     const c = await env.DB.prepare("SELECT id,nparts,ntitle,ctitle,status,fmt FROM tts_ch WHERE nid=? AND idx=?").bind(tk.dl, tk.ix).first();
-    let pubId = c && c.id, pubN = c && c.nparts;
-    if (tk.g) { const sg2 = await env.DB.prepare('SELECT ch_id,nparts FROM tts_gen_stage WHERE nid=? AND idx=? AND ch_id=?').bind(tk.dl, tk.ix, +tk.g).first(); if (!sg2) return fail('الصوت لسه مش جاهز', 404); pubId = sg2.ch_id; pubN = sg2.nparts; }
+    let pubId = c && c.id, pubN = c && c.nparts, stFmt = '';
+    if (tk.g) { const sg2 = await env.DB.prepare('SELECT ch_id,nparts,fmt FROM tts_gen_stage WHERE nid=? AND idx=? AND ch_id=?').bind(tk.dl, tk.ix, +tk.g).first(); if (!sg2) return fail('الصوت لسه مش جاهز', 404); pubId = sg2.ch_id; pubN = sg2.nparts; stFmt = sg2.fmt; }
     else if (!c || c.status !== 'done') return fail('الصوت لسه مش جاهز', 404);
     if (!c) return fail('الفصل مش موجود', 404);
-    const mp = !tk.g && c.fmt === 'mp3', keys = []; for (let i = 0; i < pubN; i++) keys.push('c/' + pubId + '/' + i + (mp ? '.mp3' : '.wav'));
+    const mp = (tk.g ? stFmt === 'mp3' : c.fmt === 'mp3'), keys = []; for (let i = 0; i < pubN; i++) keys.push('c/' + pubId + '/' + i + (mp ? '.mp3' : '.wav'));
     const heads = await Promise.all(keys.map((k) => env.TTS_BUCKET.head(k)));
     if (heads.some((h) => !h)) return fail('جزء من الصوت ناقص', 404);
     if (mp) { // MP3: الأجزاء بتتلزق ورا بعض زي ما هي
@@ -3729,8 +3777,9 @@ async function route(request, env) {
       const claim = await env.DB.prepare("UPDATE tts_gen_stage SET status='publishing', claimed_at=? WHERE nid=? AND idx=? AND ch_id=? AND status='staged'").bind(now, nid, ix, st.ch_id).run(); // ادعاء الجيل: قفل متزامن
       if (!(claim && claim.meta && claim.meta.changes)) return fail('نشر آخر جارٍ للجيل ده', 409);
       const release = (m) => env.DB.prepare("UPDATE tts_gen_stage SET status='staged', err=? WHERE nid=? AND idx=? AND ch_id=? AND status='publishing'").bind(m, nid, ix, st.ch_id).run();
+      const isMp3 = st.fmt === 'mp3'; // الجيل MP3: مسار تحقق منفصل تحت، مسار WAV تحته زي ما هو
       const shas = new Array(st.nparts), szs = new Array(st.nparts).fill(0); let bad = -1;
-      for (let i0 = 0; i0 < st.nparts && bad < 0; i0 += 10) { // تحقق integrity لكل جزء: وجود + حجم + sha256 من metadata التخزين (مدخلات الرفع)
+      for (let i0 = 0; !isMp3 && i0 < st.nparts && bad < 0; i0 += 10) { // تحقق integrity لكل جزء: وجود + حجم + sha256 من metadata التخزين (مدخلات الرفع)
         await Promise.all(Array.from({ length: Math.min(10, st.nparts - i0) }, async (_, k) => {
           const i = i0 + k, h = await env.TTS_BUCKET.head('c/' + st.ch_id + '/' + i + '.wav');
           const m = h && h.customMetadata && /^[0-9a-f]{64}$/.test(h.customMetadata.sha256 || '') ? h.customMetadata.sha256 : '';
@@ -3738,23 +3787,25 @@ async function route(request, env) {
           shas[i] = m; szs[i] = h.size;
         }));
       }
-      if (bad < 0) { // مدة PCM الفعلية من أحجام كل الأجزاء ((size-44)/48000) تقارَن بمدة الجيل المعلنة بسماحية تقريب
+      if (!isMp3 && bad < 0) { // مدة PCM الفعلية من أحجام كل الأجزاء ((size-44)/48000) تقارَن بمدة الجيل المعلنة بسماحية تقريب
         const pcmSecs = szs.reduce((a, z) => a + (z - 44) / 48000, 0);
         if (Math.abs(pcmSecs - st.secs) > st.nparts * 0.5 + 1) bad = -2;
       }
       if (bad === -2) { await release('مدة الجيل المعلنة لا تطابق أحجام الأجزاء'); try { await notifyAdmins(env, '', 'تعذّر نشر صوت فصل 🎧', 'نشر صوت فصل ' + (ix + 1) + ' اتوقف: مدة الجيل المعلنة لا تطابق أحجام الأجزاء. لن يُعاد تلقائيًا.', 'ttspub' + nid + '#' + ix + '#' + st.ch_id); } catch (e2) {} return fail('نشر متوقف: مدة الجيل لا تطابق أحجام الأجزاء', 409); }
-      if (bad < 0) { // عيّنة محدودة يعاد حساب بصمتها من البايتات الفعلية (أول/وسط/آخر جزء) — البصمات الباقية مدخلات رفع موثّق بها لا إعادة حساب كاملة
+      let mp3Msg = '';
+      if (isMp3) { const mv = await mp3VerifyStage(env, st); mv.shas.forEach((x, i) => { shas[i] = x; }); bad = mv.bad; mp3Msg = mv.err; if (bad === -2) { await release(mp3Msg); try { await notifyAdmins(env, '', 'تعذّر نشر صوت فصل 🎧', 'نشر صوت فصل ' + (ix + 1) + ' اتوقف: ' + mp3Msg + '. لن يُعاد تلقائيًا.', 'ttspub' + nid + '#' + ix + '#' + st.ch_id); } catch (e2) {} return fail('نشر متوقف: ' + mp3Msg, 409); } }
+      if (!isMp3 && bad < 0) { // عيّنة محدودة يعاد حساب بصمتها من البايتات الفعلية (أول/وسط/آخر جزء) — البصمات الباقية مدخلات رفع موثّق بها لا إعادة حساب كاملة
         const sample = [...new Set([0, Math.floor((st.nparts - 1) / 2), st.nparts - 1])];
         for (const i of sample) { const o = await env.TTS_BUCKET.get('c/' + st.ch_id + '/' + i + '.wav'); if (!o) { bad = i; break; } const buf = await o.arrayBuffer(), dv = new DataView(buf), td = new TextDecoder('ascii');
           const pcm = buf.byteLength >= 44 && td.decode(new Uint8Array(buf, 0, 4)) === 'RIFF' && td.decode(new Uint8Array(buf, 8, 4)) === 'WAVE' && dv.getUint16(20, true) === 1 && dv.getUint16(22, true) === 1 && dv.getUint32(24, true) === 24000 && dv.getUint16(34, true) === 16 && td.decode(new Uint8Array(buf, 36, 4)) === 'data' && dv.getUint32(40, true) === buf.byteLength - 44;
           if (!pcm) { bad = i; break; } // صيغة PCM 24kHz/16-bit/mono + عدّ البايتات مربوطان بالترويسة الفعلية
           const dh = await crypto.subtle.digest('SHA-256', buf); if ([...new Uint8Array(dh)].map((x) => x.toString(16).padStart(2, '0')).join('') !== shas[i]) { bad = i; break; } }
       }
-      if (bad >= 0) { await release('جزء ناقص أو بصمته لا تطابق بايتاته: ' + bad); try { await notifyAdmins(env, '', 'تعذّر نشر صوت فصل 🎧', 'نشر صوت فصل ' + (ix + 1) + ' اتوقف: جزء ' + bad + ' ناقص أو بصمته لا تطابق. لن يُعاد تلقائيًا.', 'ttspub' + nid + '#' + ix + '#' + st.ch_id); } catch (e2) {} return fail('نشر متوقف: جزء ' + bad + ' ناقص أو بصمته لا تطابق', 409); }
+      if (bad >= 0 || bad === -3) { if (isMp3) { await release(mp3Msg); try { await notifyAdmins(env, '', 'تعذّر نشر صوت فصل 🎧', 'نشر صوت فصل ' + (ix + 1) + ' اتوقف: ' + mp3Msg + '. لن يُعاد تلقائيًا.', 'ttspub' + nid + '#' + ix + '#' + st.ch_id); } catch (e2) {} return fail('نشر متوقف: ' + mp3Msg, 409); } await release('جزء ناقص أو بصمته لا تطابق بايتاته: ' + bad); try { await notifyAdmins(env, '', 'تعذّر نشر صوت فصل 🎧', 'نشر صوت فصل ' + (ix + 1) + ' اتوقف: جزء ' + bad + ' ناقص أو بصمته لا تطابق. لن يُعاد تلقائيًا.', 'ttspub' + nid + '#' + ix + '#' + st.ch_id); } catch (e2) {} return fail('نشر متوقف: جزء ' + bad + ' ناقص أو بصمته لا تطابق', 409); }
       const man = await crypto.subtle.digest('SHA-256', enc.encode(shas.join('')));
       if ([...new Uint8Array(man)].map((x) => x.toString(16).padStart(2, '0')).join('') !== st.sig) { await release('بصمة الجيل لا تطابق التجهيز'); try { await notifyAdmins(env, '', 'تعذّر نشر صوت فصل 🎧', 'نشر صوت فصل ' + (ix + 1) + ' اتوقف: بصمة الأجزاء المخزّنة لا تطابق بصمة التجهيز. لن يُعاد تلقائيًا.', 'ttspub' + nid + '#' + ix + '#' + st.ch_id); } catch (e2) {} return fail('بصمة الأجزاء لا تطابق التجهيز — النشر متوقف', 409); }
       const rb = await env.DB.batch([ // تبديل ذري: التبديل + إغلاق الجيل + سجل الإشعار في معاملة واحدة
-        env.DB.prepare("UPDATE tts_ch SET id=?, parts=?, nparts=?, done=?, secs=?, status='done', owner='', lock_until=0, err='', updated=? WHERE id=? AND nid=? AND idx=? AND updated=?").bind(st.ch_id, st.parts, st.nparts, st.nparts, st.secs, now, st.old_id, nid, ix, st.old_updated),
+        env.DB.prepare("UPDATE tts_ch SET id=?, parts=?, nparts=?, done=?, secs=?, fmt=?, status='done', owner='', lock_until=0, err='', updated=? WHERE id=? AND nid=? AND idx=? AND updated=?").bind(st.ch_id, st.parts, st.nparts, st.nparts, st.secs, isMp3 ? 'mp3' : 'wav', now, st.old_id, nid, ix, st.old_updated),
         env.DB.prepare("UPDATE tts_gen_stage SET status='published' WHERE nid=? AND idx=? AND ch_id=? AND status='publishing' AND EXISTS(SELECT 1 FROM tts_ch WHERE id=? AND nid=? AND idx=? AND status='done')").bind(nid, ix, st.ch_id, st.ch_id, nid, ix),
         env.DB.prepare("INSERT OR IGNORE INTO tts_notify_gen (nid,idx,ch_id,ts,res) SELECT ?,?,?,?,'' WHERE EXISTS(SELECT 1 FROM tts_ch WHERE id=? AND nid=? AND idx=?)").bind(nid, ix, st.ch_id, now, st.ch_id, nid, ix),
       ]);
