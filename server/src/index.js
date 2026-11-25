@@ -143,6 +143,7 @@ async function ensureSchema(env) {
     'CREATE TABLE IF NOT EXISTS pts_votes (voter INTEGER NOT NULL, nid TEXT NOT NULL, ch INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (voter, nid, ch))',
     "CREATE TABLE IF NOT EXISTS wal_log (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, day TEXT NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, amt REAL NOT NULL DEFAULT 0, ts INTEGER NOT NULL DEFAULT 0, UNIQUE(uid,kind,ref))",
     "CREATE TABLE IF NOT EXISTS withdrawals (id INTEGER PRIMARY KEY AUTOINCREMENT, uid INTEGER NOT NULL, points REAL NOT NULL, egp REAL NOT NULL, rate REAL NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', ts INTEGER NOT NULL, decided INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS oauth_ids (provider TEXT NOT NULL, sub TEXT NOT NULL, uid INTEGER NOT NULL, ts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (provider, sub))",
     "CREATE TABLE IF NOT EXISTS streaks (uid INTEGER PRIMARY KEY, last TEXT NOT NULL DEFAULT '', cur INTEGER NOT NULL DEFAULT 0, awards INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS ch_alerts (uid INTEGER NOT NULL, nid TEXT NOT NULL, ch INTEGER NOT NULL, rel INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', sent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (uid, nid, ch))",
     'CREATE INDEX IF NOT EXISTS ch_alerts_due ON ch_alerts (sent, rel)',
@@ -2398,6 +2399,28 @@ async function mp3VerifyStage(env, st) {
   }
   return { shas, err: '', bad: -1 };
 }
+/* ---------- تسجيل الدخول بجوجل / فيسبوك: بنتحقق من التوكن عند الشركة نفسها ---------- */
+const socConf = async (env) => { const c = await getSetting(env, 'social'); return { google: str(c.google, 200).trim(), facebook: str(c.facebook, 40).trim() }; };
+async function socVerify(env, provider, token, nonce) { // بيرجّع { sub, email, verified, name } أو null
+  const jf = async (u) => { try { const r = await fetch(u, { headers: { Accept: 'application/json' } }); if (!r.ok) return null; return await r.json(); } catch (e) { return null; } };
+  const cf = await socConf(env);
+  if (provider === 'google') {
+    if (!cf.google) return null;
+    const t = await jf('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(token));
+    if (!t || t.aud !== cf.google || !/^(https:\/\/)?accounts\.google\.com$/.test(String(t.iss || '')) || !(Number(t.exp) * 1000 > Date.now()) || !t.sub) return null;
+    if (nonce && t.nonce && t.nonce !== nonce) return null;
+    return { sub: String(t.sub), email: String(t.email || '').toLowerCase(), verified: t.email_verified === 'true' || t.email_verified === true, name: String(t.name || '') };
+  }
+  if (provider === 'facebook') {
+    if (!cf.facebook) return null;
+    const a = await jf('https://graph.facebook.com/app?access_token=' + encodeURIComponent(token));
+    if (!a || String(a.id) !== cf.facebook) return null; // التوكن لازم يكون طالع لتطبيقنا إحنا
+    const me = await jf('https://graph.facebook.com/me?fields=id,name,email&access_token=' + encodeURIComponent(token));
+    if (!me || !me.id) return null;
+    return { sub: String(me.id), email: String(me.email || '').toLowerCase(), verified: false, name: String(me.name || '') };
+  }
+  return null;
+}
 const audioResp = (obj, hit) => new Response(obj.body || obj, { status: 200, headers: { ...CORS, 'Content-Type': 'audio/wav', 'Cache-Control': 'private, no-store', 'X-Cache': hit ? 'HIT' : 'MISS' } });
 const CPS = 14; // حروف في الثانية تقريبًا (لتقدير المدة والتكلفة قبل التحويل)
 const hasMk = (t) => /[«“"]/.test(t) || /(^|\n)\s*[-–—]/.test(t);
@@ -2941,6 +2964,40 @@ async function route(request, env) {
     const id = r.meta.last_row_id;
     if (dev) { await env.DB.prepare('INSERT OR IGNORE INTO dev_accts (dev,uid,ts) VALUES (?,?,?)').bind(dev, id, Date.now()).run(); await devEnter(env, { id, role, premium_until: 0 }, dev); }
     return json({ token: await makeToken(env, id), user: await withOwner(env, userOut({ id, email, name, role, premium_until: 0 })) });
+  }
+  if (path === '/api/social/config' && m === 'GET') { const c = await socConf(env); return json({ google: c.google, facebook: c.facebook }, 200, { 'Cache-Control': 'public, max-age=300' }); }
+  if (path === '/api/auth/social' && m === 'POST') {
+    if (await tooMany(env, 'soc:' + ip, 20, 900000)) return fail('محاولات كتير، جرّب بعد شوية', 429);
+    const b = await body(request, 6000), provider = b.provider === 'facebook' ? 'facebook' : (b.provider === 'google' ? 'google' : '');
+    const tok = String(b.token || '').trim();
+    if (!provider || tok.length < 20 || tok.length > 4000) return fail('بيانات الدخول غير صحيحة');
+    await noteAttempt(env, 'soc:' + ip);
+    const v = await socVerify(env, provider, tok, str(b.nonce, 80));
+    if (!v) return fail('معرفناش نتأكد من حسابك. جرّب تاني', 401);
+    const dev = devOf(request);
+    let uid = (await env.DB.prepare('SELECT uid FROM oauth_ids WHERE provider=? AND sub=?').bind(provider, v.sub).first() || {}).uid || 0, u = null;
+    if (uid) u = await env.DB.prepare('SELECT id,email,name,role,premium_until,avatar,bio,links FROM users WHERE id=?').bind(uid).first();
+    if (!u && v.email && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v.email)) { // لو الإيميل مسجّل قبل كده
+      const ex = await env.DB.prepare('SELECT id,email,name,role,premium_until,avatar,bio,links FROM users WHERE email=?').bind(v.email).first();
+      if (ex) {
+        if (provider !== 'google' || !v.verified) return fail('الإيميل ده مسجّل عندنا بالباسورد. ادخل بيه عادي', 409);
+        u = ex; await env.DB.prepare('INSERT OR IGNORE INTO oauth_ids (provider,sub,uid,ts) VALUES (?,?,?,?)').bind(provider, v.sub, u.id, Date.now()).run();
+      }
+    }
+    if (!u) { // حساب جديد
+      if (dev && (await env.DB.prepare('SELECT COUNT(*) AS n FROM dev_accts WHERE dev=?').bind(dev).first()).n >= MAX_DEV_ACCTS) return fail('أنت تمتلك الآن حسابين، لا يمكنك عمل حساب آخر', 403);
+      const nm = str(v.name, 40).replace(/[<>"]/g, '').trim(), name = nm.length >= 2 ? nm : 'قارئ',
+        email = v.email && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v.email) ? v.email : provider + '_' + v.sub + '@social.invalid';
+      const count = (await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first()).n, role = count === 0 ? 'admin' : 'user';
+      const rnd = [...crypto.getRandomValues(new Uint8Array(24))].map((x) => x.toString(16).padStart(2, '0')).join('');
+      const r = await env.DB.prepare('INSERT INTO users (email,name,pass_hash,role,created_at) VALUES (?,?,?,?,?)').bind(email, name, await hashPassword(rnd), role, Date.now()).run();
+      const id = r.meta.last_row_id;
+      await env.DB.prepare('INSERT OR IGNORE INTO oauth_ids (provider,sub,uid,ts) VALUES (?,?,?,?)').bind(provider, v.sub, id, Date.now()).run();
+      if (dev) await env.DB.prepare('INSERT OR IGNORE INTO dev_accts (dev,uid,ts) VALUES (?,?,?)').bind(dev, id, Date.now()).run();
+      u = { id, email, name, role, premium_until: 0 };
+    }
+    if (!(await devEnter(env, u, dev))) return fail(devBlockMsg(u), 403);
+    return json({ token: await makeToken(env, u.id), user: await withOwner(env, userOut(u)) });
   }
   if (path === '/api/login' && m === 'POST') {
     const b = await body(request);
@@ -3891,6 +3948,13 @@ async function route(request, env) {
       const { results } = await env.DB.prepare("SELECT nid, MAX(ntitle) AS ntitle, COUNT(*) AS n, COALESCE(SUM(secs),0) AS secs, SUM(CASE WHEN fmt='mp3' THEN 1 ELSE 0 END) AS mp3 FROM tts_ch WHERE status='done' GROUP BY nid ORDER BY MAX(ntitle)").all();
       const kp = await ttsKeep(env, results);
       return json({ novels: results.map((r) => ({ ...r, keep: kp.has(r.nid) })), keepMissing: kp.missing });
+    }
+    if (path === '/api/admin/social' && m === 'GET') return json(await socConf(env));
+    if (path === '/api/admin/social' && m === 'POST') {
+      const b = await body(request, 600), g = str(b.google, 200).trim(), f = str(b.facebook, 40).trim();
+      if (g && !/^[\w.-]+\.apps\.googleusercontent\.com$/.test(g)) return fail('Google Client ID شكله غلط (لازم ينتهي بـ apps.googleusercontent.com)');
+      if (f && !/^\d{5,25}$/.test(f)) return fail('Facebook App ID لازم يكون أرقام بس');
+      await setSetting(env, 'social', { google: g, facebook: f }); return json({ ok: true, google: g, facebook: f });
     }
     if (path === '/api/admin/tts/cxkey' && m === 'POST') { // مفتاح الضغط (للـGitHub Actions): الرابط#المفتاح — صالح سنة
       const bd = b64u(enc.encode(JSON.stringify({ cx: 1, exp: Date.now() + 365 * 86400000 })));

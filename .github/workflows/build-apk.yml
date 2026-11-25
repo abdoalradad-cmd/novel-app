@@ -39,6 +39,9 @@ jobs:
           grep -n "TTS_SERVICE" android/app/src/main/AndroidManifest.xml
           sed -i '0,/^dependencies {/s//dependencies {\n    implementation "androidx.webkit:webkit:1.12.1"/' android/app/build.gradle
           grep -n "androidx.webkit" android/app/build.gradle
+          # رجوع من تسجيل جوجل/فيسبوك: رابط radpad://auth بيفتح التطبيق (Capacitor بيبعته للصفحة كحدث appUrlOpen)
+          sed -i '0,/<\/activity>/s#</activity>#    <intent-filter>\n                <action android:name="android.intent.action.VIEW" />\n                <category android:name="android.intent.category.DEFAULT" />\n                <category android:name="android.intent.category.BROWSABLE" />\n                <data android:scheme="radpad" android:host="auth" />\n            </intent-filter>\n        </activity>#' android/app/src/main/AndroidManifest.xml
+          grep -n 'android:scheme="radpad"' android/app/src/main/AndroidManifest.xml
 
       - name: Add phone push notifications (Firebase)
         run: |
