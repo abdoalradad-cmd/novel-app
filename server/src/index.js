@@ -3011,6 +3011,16 @@ async function route(request, env) {
   }
 
   /* ----- عام: الروايات المعتمدة ----- */
+  if (path === '/api/site-covers' && m === 'GET') {
+    /* أغلفة روايات الموقع المرتبطة بنسخة سيرفر: النسخة دي هي اللي تتعرض بدل الغلاف القديم المرفوع مع الموقع */
+    const { results } = await env.DB.prepare("SELECT d_cover,l_cover,d_extra,l_extra FROM novels WHERE l_extra LIKE '%\"siteId\"%' OR d_extra LIKE '%\"siteId\"%'").all();
+    const covers = {};
+    for (const r of results) {
+      const sid = extraOf(r.d_extra).siteId || extraOf(r.l_extra).siteId, cv = r.d_cover || r.l_cover;
+      if (sid && cv && /^https:\/\//i.test(cv)) covers[sid] = cv;
+    }
+    return json({ covers }, 200, { 'Cache-Control': 'public, max-age=30' });
+  }
   if (path === '/api/novels' && m === 'GET') {
     const { results } = await env.DB.prepare(
       `SELECT n.id,n.user_id,n.l_title,n.l_author,n.l_genre,n.l_tags,n.l_synopsis,n.l_cover,n.l_extra,n.published_at,u.name AS owner
