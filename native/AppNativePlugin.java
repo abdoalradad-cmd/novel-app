@@ -2,14 +2,20 @@ package com.alradad.novels;
 
 import android.app.Application;
 import android.app.Activity;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.media.AudioManager;
 import android.media.AudioPlaybackConfiguration;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
+import android.util.Base64;
 import android.print.PrintAttributes;
 import android.print.PrintDocumentAdapter;
 import android.print.PrintManager;
@@ -26,6 +32,7 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -362,5 +369,95 @@ public class AppNativePlugin extends Plugin {
             c.stopService(new Intent(c, PlaybackService.class));
         } catch (Throwable e) { }
         call.resolve();
+    }
+
+    /* ---------- حفظ ملف في مجلد التنزيلات مباشرة (بدون نافذة اختيار) ---------- */
+    private final Map<String, OutputStream> fileOuts = new ConcurrentHashMap<>();
+    private final Map<String, Uri> fileUris = new ConcurrentHashMap<>();
+
+    @PluginMethod
+    public void fileOpen(PluginCall call) {
+        try {
+            if (Build.VERSION.SDK_INT < 29) { call.reject("unsupported"); return; }
+            String name = call.getString("name", "file.pdf");
+            String mime = call.getString("mime", "application/pdf");
+            ContentResolver cr = getContext().getContentResolver();
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+            v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            v.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            Uri uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+            if (uri == null) { call.reject("insert failed"); return; }
+            OutputStream os = cr.openOutputStream(uri);
+            if (os == null) { call.reject("open failed"); return; }
+            String id = UUID.randomUUID().toString();
+            fileOuts.put(id, os);
+            fileUris.put(id, uri);
+            JSObject r = new JSObject();
+            r.put("id", id);
+            call.resolve(r);
+        } catch (Throwable e) {
+            call.reject(String.valueOf(e.getMessage()));
+        }
+    }
+
+    @PluginMethod
+    public void fileWrite(PluginCall call) {
+        try {
+            OutputStream os = fileOuts.get(call.getString("id", ""));
+            if (os == null) { call.reject("no stream"); return; }
+            byte[] b = Base64.decode(call.getString("data", ""), Base64.DEFAULT);
+            os.write(b);
+            call.resolve();
+        } catch (Throwable e) {
+            call.reject(String.valueOf(e.getMessage()));
+        }
+    }
+
+    @PluginMethod
+    public void fileClose(PluginCall call) {
+        try {
+            String id = call.getString("id", "");
+            OutputStream os = fileOuts.remove(id);
+            Uri uri = fileUris.remove(id);
+            if (os == null || uri == null) { call.reject("no stream"); return; }
+            os.flush();
+            os.close();
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            getContext().getContentResolver().update(uri, v, null, null);
+            JSObject r = new JSObject();
+            r.put("uri", uri.toString());
+            call.resolve(r);
+        } catch (Throwable e) {
+            call.reject(String.valueOf(e.getMessage()));
+        }
+    }
+
+    @PluginMethod
+    public void fileAbort(PluginCall call) {
+        try {
+            String id = call.getString("id", "");
+            OutputStream os = fileOuts.remove(id);
+            Uri uri = fileUris.remove(id);
+            try { if (os != null) os.close(); } catch (Throwable e) { }
+            if (uri != null) getContext().getContentResolver().delete(uri, null, null);
+        } catch (Throwable e) { }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void fileView(PluginCall call) {
+        try {
+            Uri uri = Uri.parse(call.getString("uri", ""));
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(uri, call.getString("mime", "application/pdf"));
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(i);
+            call.resolve();
+        } catch (Throwable e) {
+            call.reject(String.valueOf(e.getMessage()));
+        }
     }
 }
